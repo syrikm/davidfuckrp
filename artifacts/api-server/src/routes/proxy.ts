@@ -6274,17 +6274,22 @@ async function handleFriendProxy({
   let msgSummaryStr = "";  // e.g. "S:4521 U:892 A:1203 U:45"
   let systemCompatFallback = false;
 
-  // ── Bare-name dot→dash normalization ─────────────────────────────────────
+  // ── Bare-name dot→dash normalization (Claude-only) ───────────────────────
   // Mother's /v1/models exposes BOTH dot-form (e.g. claude-opus-4.6-thinking)
-  // AND dash-form (claude-opus-4-6-thinking) bare aliases.  Child's bare-name
-  // registry, however, only contains the DASH form — sending the dot form to
-  // any child endpoint yields {"code":"UNSUPPORTED_MODEL"}.  For bare names
-  // (no provider prefix), rewrite the embedded "M.N" version separator to
-  // "M-N" so the request lands on a name the sub-node actually accepts.
+  // AND dash-form (claude-opus-4-6-thinking) bare Claude aliases.  Child's
+  // bare-name registry, however, only contains the DASH form for Claude —
+  // sending the dot form yields {"code":"UNSUPPORTED_MODEL"}.
+  //
+  // CRITICAL: do NOT apply this to gemini-* / gpt-* / other vendors — child
+  // stores those bare names with the DOT preserved (e.g. gemini-2.5-pro,
+  // gemini-3.1-pro-preview, gpt-3.5-turbo).  An earlier blanket dot→dash
+  // rule mangled them into gemini-2-5-pro / gpt-3-5-turbo and caused 400
+  // UNSUPPORTED_MODEL on every Gemini bare-name request.
   // Provider-prefixed ids (anthropic/, bedrock/, vertex/, …) keep both forms
-  // in the sub-node registry, so we only touch slash-less names.
+  // in the sub-node registry, so we only touch slash-less Claude names.
   const normalizedModel = (() => {
     if (model.includes("/")) return model;
+    if (!/^claude-/i.test(model)) return model;
     if (!/\d+\.\d/.test(model)) return model;
     return model.replace(/(\d+)\.(\d)/g, "$1-$2");
   })();
@@ -6531,15 +6536,32 @@ async function handleFriendProxy({
     }
     const json = await fetchRes.json() as Record<string, unknown>;
 
-    // Guard: Check for empty assistant response (fixes "Empty assistant response" in Kilo Code)
-    // Some providers return 200 OK with empty content during routing/internal errors.
+    // Guard: detect genuinely-broken upstream responses without manufacturing
+    // false 5xxs.  Some providers legitimately return 200 OK with empty content
+    // (e.g. claude-opus-4.6-fast at very small max_tokens budgets where the
+    // model spends the budget on adaptive reasoning and emits no visible text,
+    // or any model that returned only a finish_reason).  Treat as broken ONLY
+    // when the provider also reports zero completion tokens — i.e. the model
+    // produced nothing at all upstream.  Otherwise pass the response through
+    // and let the client decide; never reframe a valid 200 as a 502.
     const choices = json["choices"] as any[];
-    const hasContent = !!choices?.[0]?.message?.content?.trim();
-    const hasToolCalls = !!choices?.[0]?.message?.tool_calls?.length;
-    const hasReasoning = !!(choices?.[0]?.message as any)?.reasoning_content || !!(choices?.[0]?.message as any)?.reasoning;
-    
+    const usageObj = json["usage"] as Record<string, unknown> | null | undefined;
+    const completionTokens = (usageObj as { completion_tokens?: number } | undefined)?.completion_tokens ?? 0;
+    const hasContent    = !!choices?.[0]?.message?.content?.trim();
+    const hasToolCalls  = !!choices?.[0]?.message?.tool_calls?.length;
+    const hasReasoning  = !!(choices?.[0]?.message as any)?.reasoning_content || !!(choices?.[0]?.message as any)?.reasoning;
+    const finishReason  = choices?.[0]?.finish_reason;
+
+    if (!hasContent && !hasToolCalls && !hasReasoning && completionTokens === 0 && !finishReason) {
+      throw new FriendProxyHttpError(502, "Upstream returned an empty assistant response (no content, tools, reasoning, or finish_reason)");
+    }
     if (!hasContent && !hasToolCalls && !hasReasoning) {
-      throw new FriendProxyHttpError(502, "Upstream returned an empty assistant response (no content, tools, or reasoning)");
+      // Pass through but log — model produced *something* upstream (non-zero
+      // completion tokens or a finish_reason) but the visible payload is empty.
+      // This commonly happens when adaptive reasoning consumed the entire
+      // max_tokens budget; the client sees an empty assistant message and can
+      // retry with a larger budget if it cares.
+      req.log.warn({ model, completionTokens, finishReason }, "upstream 200 with empty visible payload — passing through");
     }
 
     captureResponseFn?.(json);

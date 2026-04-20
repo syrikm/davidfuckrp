@@ -1105,6 +1105,18 @@ function applyModelRoute(id: string): string {
 //   vertex/gemini-*    →  google/gemini-*
 //   aistudio/gemini-*  →  google/gemini-*
 //   anything else      →  unchanged
+// Translate sub-node-known prefixes to OR-canonical forms ONLY when we have
+// an unambiguous mapping; otherwise pass through unchanged so the sub-node's
+// own model registry handles routing.
+//
+// Why not strip every prefix?  Because the sub-node's chat handler already
+// understands bedrock/, vertex/, aistudio/ prefixes natively (per child
+// `mapModelToOR`: bedrock/claude-* → anthropic + provider:only=bedrock;
+// vertex/gemini-* → google + provider:only=google-vertex; etc).  Stripping
+// to a bare name like `vertex/gemma-3-12b-it` → `gemma-3-12b-it` makes the
+// sub-node consult its bare-name registry, which routes that bare id to a
+// non-existent Vertex deployment and 404s.  Keep the prefix and let the
+// sub-node route — it knows what to do.
 function normalizeFriendModel(m: string): string {
   if (m.startsWith("bedrock/")) {
     return "anthropic/" + m.slice("bedrock/".length);
@@ -1113,12 +1125,16 @@ function normalizeFriendModel(m: string): string {
     const rest = m.slice("vertex/".length);
     if (/^claude-/.test(rest)) return "anthropic/" + rest;
     if (/^gemini-/.test(rest)) return "google/" + rest;
-    return rest;
+    // gemma, llama, mistral and other open-weight models hosted on Vertex are
+    // also published on multiple OR backends.  Map to google/ when unambiguous;
+    // otherwise leave prefix intact so the sub-node picks the right path.
+    if (/^gemma-/.test(rest)) return "google/" + rest;
+    return m;
   }
   if (m.startsWith("aistudio/")) {
     const rest = m.slice("aistudio/".length);
     if (/^gemini-/.test(rest)) return "google/" + rest;
-    return rest;
+    return m;
   }
   return m;
 }
@@ -6552,16 +6568,24 @@ async function handleFriendProxy({
     const hasReasoning  = !!(choices?.[0]?.message as any)?.reasoning_content || !!(choices?.[0]?.message as any)?.reasoning;
     const finishReason  = choices?.[0]?.finish_reason;
 
-    if (!hasContent && !hasToolCalls && !hasReasoning && completionTokens === 0 && !finishReason) {
-      throw new FriendProxyHttpError(502, "Upstream returned an empty assistant response (no content, tools, reasoning, or finish_reason)");
-    }
     if (!hasContent && !hasToolCalls && !hasReasoning) {
-      // Pass through but log — model produced *something* upstream (non-zero
-      // completion tokens or a finish_reason) but the visible payload is empty.
-      // This commonly happens when adaptive reasoning consumed the entire
-      // max_tokens budget; the client sees an empty assistant message and can
-      // retry with a larger budget if it cares.
-      req.log.warn({ model, completionTokens, finishReason }, "upstream 200 with empty visible payload — passing through");
+      // Sub-node returned 200 but the body has no visible payload.  Pure
+      // pass-through — never reframe a sub-node 200 as a mother 5xx, even
+      // when the body is empty.  Common legitimate causes:
+      //   • Adaptive reasoning consumed the entire max_tokens budget (no
+      //     visible content but completion_tokens>0).
+      //   • Provider returned a degenerate 200 (e.g. openai/o3 at tiny
+      //     max_tokens, certain niche/deprecated OR backends).
+      // The mother proxy's contract is: full consumption of sub-node
+      // capability — if the sub-node says 200, the client gets 200.  The
+      // client can detect emptiness and retry with a larger budget or a
+      // different model.  Reframing as 5xx would (a) hide real upstream
+      // behaviour and (b) trigger unwanted client retries that waste
+      // cache_write tokens.
+      req.log.warn(
+        { model, completionTokens, finishReason },
+        "upstream 200 with empty visible payload — passing through (no synthetic 5xx)"
+      );
     }
 
     captureResponseFn?.(json);

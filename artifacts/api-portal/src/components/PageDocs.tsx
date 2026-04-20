@@ -50,9 +50,9 @@ POST /v1/chat/completions
 POST /v1/messages
 - Claude Messages 风格请求
 
-POST /v1/models/:model:generateContent
-POST /v1/models/:model:streamGenerateContent
-- Gemini 原生格式请求
+POST /v1beta/models/:model:generateContent
+POST /v1beta/models/:model:streamGenerateContent
+- Gemini 原生格式请求（与 Google AI Studio / @google/genai SDK 一致）
 
 GET /api/healthz
 - 健康检查，不需要认证`,

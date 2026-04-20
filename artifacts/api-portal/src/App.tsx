@@ -1365,6 +1365,10 @@ POST /v1/chat/completions
 POST /v1/messages
 - Anthropic / Claude Messages 风格入口
 
+POST /v1beta/models/:model:generateContent
+POST /v1beta/models/:model:streamGenerateContent
+- Gemini 原生格式入口（与 Google AI Studio / @google/genai SDK 一致）
+
 POST /api
 - 母代理统一入口
 - 当你手动发送 OpenAI / Anthropic / Gemini 风格 body 时，由网关自动归一化

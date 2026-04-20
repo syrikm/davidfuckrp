@@ -4475,6 +4475,139 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 });
 
 // ---------------------------------------------------------------------------
+// Gemini-native /v1beta/models/:modelAction endpoint
+// Accepts native Gemini SDK format (generateContent / streamGenerateContent),
+// pass-through forwarded to a friend proxy sub-node. Mother does no body
+// transformation here — the sub-node owns the Gemini request shape.
+// Retry policy mirrors /v1/messages: full retry on 5xx/429 before headers
+// are committed; single-shot once streaming has begun.
+// ---------------------------------------------------------------------------
+router.post("/v1beta/models/:modelAction", requireApiKey, async (req: Request, res: Response) => {
+  const modelAction = String(req.params["modelAction"] ?? "");
+  const colonIdx    = modelAction.lastIndexOf(":");
+  const modelName   = colonIdx >= 0 ? modelAction.slice(0, colonIdx) : modelAction;
+  const action      = colonIdx >= 0 ? modelAction.slice(colonIdx + 1) : "generateContent";
+  const isStream    = action === "streamGenerateContent";
+
+  if (!modelName) {
+    res.status(400).json({ error: { code: 400, message: "model name is required in the path", status: "INVALID_ARGUMENT" } });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const fp   = `gem|${modelName}|${action}`;
+
+  const MAX_RETRIES = Math.max(3, getFriendProxyConfigs().length - 1);
+  const tried = new Set<string>();
+
+  let backend = pickBackendForCache(fp);
+  if (!backend || backend.kind !== "friend") {
+    res.status(503).json({ error: { code: 503, message: "No available friend-proxy backend for Gemini-native path", status: "UNAVAILABLE" } });
+    return;
+  }
+
+  for (let attempt = 0; ; attempt++) {
+    tried.add(backend.url);
+    req.log.info({ model: modelName, action, stream: isStream, backend: backend.label, attempt }, "Gemini /v1beta → forwarding to friend proxy");
+
+    const abort   = new AbortController();
+    const onClose = (): void => { if (!res.writableEnded && !abort.signal.aborted) abort.abort("client_disconnected"); };
+    res.on("close", onClose);
+
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetIdle = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { if (!abort.signal.aborted) abort.abort("idle_timeout"); }, GATEWAY_TIMEOUTS.streamIdleMs);
+    };
+    if (isStream) resetIdle();
+
+    try {
+      const fetchRes = await fetch(`${backend.url}/v1beta/models/${encodeURIComponent(modelAction)}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${backend.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+      });
+
+      if (!fetchRes.ok) {
+        const errText = await fetchRes.text().catch(() => "unknown");
+        const fsStatus = fetchRes.status;
+        req.log.warn({ backend: backend.label, status: fsStatus, errText }, "/v1beta: sub-node returned error");
+        if (fsStatus === 429 || fsStatus === 402) markRateLimited(backend.url, fsStatus);
+        if ((fsStatus >= 500 || fsStatus === 429 || fsStatus === 402) && attempt < MAX_RETRIES && !res.headersSent) {
+          markUnhealthy(backend.url, backend.apiKey);
+          const next = pickBackendForCacheExcluding(fp, tried);
+          if (next && next.kind === "friend") {
+            backend = next;
+            if (idleTimer) clearTimeout(idleTimer);
+            res.removeListener("close", onClose);
+            continue;
+          }
+        }
+        if (!res.headersSent) {
+          res.status(fsStatus).type("application/json").send(errText);
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+        break;
+      }
+
+      if (isStream) {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders();
+
+        const reader = fetchRes.body?.getReader();
+        if (!reader) { res.end(); break; }
+        const decoder = new TextDecoder();
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.length) {
+            resetIdle();
+            res.write(decoder.decode(value, { stream: true }));
+          }
+        }
+        if (!res.writableEnded) res.end();
+        break;
+      } else {
+        const buf = await fetchRes.arrayBuffer();
+        res.status(fetchRes.status).type(fetchRes.headers.get("content-type") ?? "application/json").send(Buffer.from(buf));
+        break;
+      }
+    } catch (err) {
+      const aborted = (err as Error)?.name === "AbortError" || abort.signal.aborted;
+      req.log.warn({ err: (err as Error)?.message, aborted, backend: backend.label, attempt }, "/v1beta: fetch failed");
+      if (!aborted && attempt < MAX_RETRIES && !res.headersSent) {
+        markUnhealthy(backend.url, backend.apiKey);
+        const next = pickBackendForCacheExcluding(fp, tried);
+        if (next && next.kind === "friend") {
+          backend = next;
+          if (idleTimer) clearTimeout(idleTimer);
+          res.removeListener("close", onClose);
+          continue;
+        }
+      }
+      if (!res.headersSent) {
+        res.status(502).json({ error: { code: 502, message: aborted ? "client_disconnected" : ((err as Error)?.message ?? "upstream_error"), status: "UNAVAILABLE" } });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+      break;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      res.removeListener("close", onClose);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Real-time request log ring buffer + SSE
 // ---------------------------------------------------------------------------
 

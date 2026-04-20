@@ -1684,15 +1684,16 @@ function PageModels({
 // Mirrors child proxy commit 0f47820a SystemTab functionality.
 // ---------------------------------------------------------------------------
 
-interface VersionInfo {
-  version: string;
-  changelog?: string[];
-}
-
+// Matches the flat shape returned by GET /api/update/version
 interface VersionResponse {
-  current: VersionInfo | null;
-  remote: VersionInfo | null;
-  updateAvailable: boolean;
+  version: string;
+  hasUpdate: boolean;
+  latestVersion?: string;
+  latestReleaseNotes?: string;
+  latestReleaseDate?: string;
+  releaseNotes?: string;
+  source?: string;
+  checkError?: string;
 }
 
 const MOTHER_GITHUB_URL = "https://github.com/syrikm/davidfuckrp";
@@ -1705,7 +1706,8 @@ function SystemTab() {
   const check = useCallback(async () => {
     setChecking(true);
     try {
-      const res = await fetch("/api/version");
+      // Correct endpoint: GET /api/update/version (not /api/version)
+      const res = await fetch("/api/update/version");
       if (res.ok) {
         const d = await res.json() as VersionResponse;
         setVData(d);
@@ -1716,11 +1718,8 @@ function SystemTab() {
 
   useEffect(() => { void check(); }, [check]);
 
-  const buildPrompt = (remote: string) =>
-    `Please update this AI Proxy Gateway to the latest version (v${remote}).\n\nSource repo: ${MOTHER_GITHUB_URL}\n\nSteps:\n1. Read and record .replit file content\n2. Run:\n   git fetch ${MOTHER_GITHUB_URL} main\n   git -c core.hooksPath=/dev/null reset --hard FETCH_HEAD\n3. Restore .replit file\n4. Run: pnpm install\n5. Restart "artifacts/api-server: API Server" workflow\n\nLet me know when done.`;
-
-  const current = vData?.current;
-  const remote  = vData?.remote;
+  const buildPrompt = (remoteVer: string) =>
+    `Please update this AI Proxy Gateway to the latest version (v${remoteVer}).\n\nSource repo: ${MOTHER_GITHUB_URL}\n\nSteps:\n1. Read and record .replit file content\n2. Run:\n   git fetch ${MOTHER_GITHUB_URL} main\n   git -c core.hooksPath=/dev/null reset --hard FETCH_HEAD\n3. Restore .replit file\n4. Run: pnpm install\n5. Restart "artifacts/api-server: API Server" workflow\n\nLet me know when done.`;
 
   const C = {
     bg: "hsl(222,47%,11%)",
@@ -1747,18 +1746,21 @@ function SystemTab() {
         <div style={{ padding: "16px 22px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Gateway Version</span>
-            {current && (
+            {vData && (
               <span style={{ background: `${C.purple}20`, border: `1px solid ${C.purple}40`, color: C.purple, borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 700 }}>
-                v{current.version}
+                v{vData.version}
               </span>
             )}
-            {vData?.updateAvailable && remote && (
+            {vData?.hasUpdate && vData.latestVersion && (
               <span style={{ background: `${C.green}15`, border: `1px solid ${C.green}40`, color: C.green, borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 700 }}>
-                v{remote.version} available
+                v{vData.latestVersion} available
               </span>
             )}
-            {vData && !vData.updateAvailable && (
+            {vData && !vData.hasUpdate && !vData.checkError && (
               <span style={{ fontSize: 11, color: C.green }}>✓ Up to date</span>
+            )}
+            {vData?.checkError && (
+              <span style={{ fontSize: 11, color: C.red }}>⚠ Check failed</span>
             )}
           </div>
           <button
@@ -1774,20 +1776,18 @@ function SystemTab() {
           </button>
         </div>
 
-        {(current?.changelog || remote?.changelog) && (
-          <div style={{ padding: "14px 22px", borderBottom: vData?.updateAvailable ? `1px solid ${C.border}` : "none" }}>
+        {(vData?.releaseNotes || vData?.latestReleaseNotes) && (
+          <div style={{ padding: "14px 22px", borderBottom: vData?.hasUpdate ? `1px solid ${C.border}` : "none" }}>
             <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, fontWeight: 600 }}>
-              {vData?.updateAvailable ? "Latest Release Notes" : "Current Release Notes"}
+              {vData?.hasUpdate ? "Latest Release Notes" : "Current Release Notes"}
             </div>
-            {(vData?.updateAvailable ? remote?.changelog ?? [] : current?.changelog ?? []).map((item, i) => (
-              <div key={i} style={{ fontSize: 12, color: C.muted, lineHeight: 1.65, paddingLeft: 12, borderLeft: `2px solid ${vData?.updateAvailable ? C.green : C.accent}40`, marginBottom: 5 }}>
-                {item}
-              </div>
-            ))}
+            <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.65, paddingLeft: 12, borderLeft: `2px solid ${vData?.hasUpdate ? C.green : C.accent}40` }}>
+              {vData?.hasUpdate ? (vData.latestReleaseNotes ?? "") : (vData?.releaseNotes ?? "")}
+            </div>
           </div>
         )}
 
-        {vData?.updateAvailable && remote?.version && (
+        {vData?.hasUpdate && vData.latestVersion && (
           <div style={{ padding: "18px 22px" }}>
             <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.65, marginBottom: 14 }}>
               Copy the update prompt below and paste it to <strong style={{ color: C.text }}>Replit Agent</strong> to apply the update automatically.
@@ -1798,11 +1798,11 @@ function SystemTab() {
               color: C.muted, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-all",
               maxHeight: 180, overflowY: "auto", marginBottom: 12,
             }}>
-              {buildPrompt(remote.version)}
+              {buildPrompt(vData.latestVersion)}
             </div>
             <button
               onClick={() => {
-                navigator.clipboard.writeText(buildPrompt(remote!.version!)).then(() => {
+                navigator.clipboard.writeText(buildPrompt(vData!.latestVersion!)).then(() => {
                   setPromptCopied(true);
                   setTimeout(() => setPromptCopied(false), 2500);
                 });

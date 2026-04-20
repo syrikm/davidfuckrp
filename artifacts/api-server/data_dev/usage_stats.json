@@ -1,0 +1,18 @@
+{
+  "backends": {
+    "local": {
+      "calls": 0,
+      "errors": 0,
+      "promptTokens": 0,
+      "completionTokens": 0,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "totalDurationMs": 0,
+      "totalTtftMs": 0,
+      "streamingCalls": 0,
+      "totalCostUSD": 0,
+      "modelBreakdown": {}
+    }
+  },
+  "models": {}
+}

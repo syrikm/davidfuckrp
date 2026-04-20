@@ -1,0 +1,8 @@
+[
+  {
+    "label": "DYNAMIC_1",
+    "publicBaseUrl": "https://version-control-deployment.replit.app",
+    "apiBaseUrl": "https://version-control-deployment.replit.app/api",
+    "enabled": true
+  }
+]

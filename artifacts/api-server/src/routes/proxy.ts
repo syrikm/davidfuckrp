@@ -5383,7 +5383,28 @@ async function runLegAViaSubNodeJobApi(
                 const isProviderErr = /^4\d\d[\s:]/.test(errMsg)
                   || errMsg.includes("Provider returned error")
                   || errMsg.includes("model_not_found")
-                  || errMsg.includes("model not found");
+                  || errMsg.includes("model not found")
+                  || errMsg.includes("is not a valid model ID")
+                  || errMsg.includes("UNSUPPORTED_MODEL");
+                // ── Auto-fallback to direct /v1/chat/completions ─────────────
+                // Sub-node's /v1/jobs endpoint sometimes diverges from its
+                // /v1/chat/completions endpoint (e.g. doesn't strip -thinking
+                // suffix, rejects models that the chat endpoint accepts).
+                // If the Job API rejects with a provider-level 4xx BEFORE any
+                // chunks arrive, abandon Job API and let the caller fall back
+                // to direct streaming — same backend, same payload, working
+                // endpoint.  Cancel the (possibly already-failed) sub-node job
+                // best-effort so it doesn't sit around in the sub-node's store.
+                if (isProviderErr && job.chunks.length === 0) {
+                  fetch(`${backend.url}/v1/jobs/${jobId}`, {
+                    method: "DELETE",
+                    headers: { Authorization: `Bearer ${backend.apiKey}` },
+                    signal: AbortSignal.timeout(GATEWAY_TIMEOUTS.subNodeJobCancelMs),
+                  }).catch(() => { /* best-effort */ });
+                  clearTimeout(wallTimer);
+                  job.abort.signal.removeEventListener("abort", propagate);
+                  return false;
+                }
                 failJob(job, errMsg, isProviderErr);
                 streamDone = true;
                 break;
@@ -6120,9 +6141,27 @@ async function handleFriendProxy({
   let msgSummaryStr = "";  // e.g. "S:4521 U:892 A:1203 U:45"
   let systemCompatFallback = false;
 
+  // ── Bare-name dot→dash normalization ─────────────────────────────────────
+  // Mother's /v1/models exposes BOTH dot-form (e.g. claude-opus-4.6-thinking)
+  // AND dash-form (claude-opus-4-6-thinking) bare aliases.  Child's bare-name
+  // registry, however, only contains the DASH form — sending the dot form to
+  // any child endpoint yields {"code":"UNSUPPORTED_MODEL"}.  For bare names
+  // (no provider prefix), rewrite the embedded "M.N" version separator to
+  // "M-N" so the request lands on a name the sub-node actually accepts.
+  // Provider-prefixed ids (anthropic/, bedrock/, vertex/, …) keep both forms
+  // in the sub-node registry, so we only touch slash-less names.
+  const normalizedModel = (() => {
+    if (model.includes("/")) return model;
+    if (!/\d+\.\d/.test(model)) return model;
+    return model.replace(/(\d+)\.(\d)/g, "$1-$2");
+  })();
+  if (normalizedModel !== model) {
+    req.log.info({ original: model, normalized: normalizedModel }, "bare model dot→dash normalized for sub-node");
+  }
+
   const buildBody = (msgs: OAIMessage[]): Record<string, unknown> => {
     let finalMsgs = msgs;
-    const b: Record<string, unknown> = { ...extraParams, model, stream };
+    const b: Record<string, unknown> = { ...extraParams, model: normalizedModel, stream };
     // Only provide an Anthropic-safe default when the caller omitted every explicit
     // output cap. Never override a user-supplied token limit from the incoming request.
     if (typeof maxTokens === "number") {

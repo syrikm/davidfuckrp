@@ -8,4 +8,11 @@ router.get("/healthz", (_req, res) => {
   res.json(data);
 });
 
+router.get("/setup-status", (_req, res) => {
+  const configured = !!process.env.PROXY_API_KEY;
+  const friendProxyConfigured = !!process.env.FRIEND_PROXY_URL;
+  const storageReady = !!process.env.DEFAULT_OBJECT_STORAGE_BUCKET_ID;
+  res.json({ configured, friendProxyConfigured, storageReady });
+});
+
 export default router;

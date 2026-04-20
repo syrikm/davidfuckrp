@@ -12,10 +12,6 @@ interface LogEntry {
   stream: boolean;
   promptTokens?: number;
   completionTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  cacheTier?: string;
-  priceUSD?: number;
   level: "info" | "warn" | "error";
   error?: string;
 }
@@ -246,52 +242,21 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
         )}
         {filtered.map((l) => (
           <div key={l.id} style={{
-            display: "flex", flexDirection: "column", gap: "1px", padding: "3px 0",
+            display: "flex", gap: "8px", padding: "2px 0",
             borderBottom: "1px solid rgba(255,255,255,0.03)",
           }}>
-            {/* ── Main row ── */}
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <span style={{ color: "#475569", flexShrink: 0 }}>{l.time.slice(11, 19)}</span>
-              <span style={{ color: LEVEL_COLORS[l.level], fontWeight: 600, width: "40px", flexShrink: 0 }}>
-                {l.level.toUpperCase()}
-              </span>
-              <span style={{ color: "#94a3b8", flexShrink: 0 }}>{l.method}</span>
-              <span style={{ color: "#cbd5e1", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {l.path}
-              </span>
-              {l.model && <span style={{ color: "#818cf8", flexShrink: 0, maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.model}</span>}
-              <span style={{ color: STATUS_COLOR(l.status), flexShrink: 0 }}>{l.status}</span>
-              <span style={{ color: "#64748b", flexShrink: 0 }}>{l.duration}ms</span>
-              {l.stream && <span style={{ color: "#6366f1", fontSize: "10px", flexShrink: 0 }}>SSE</span>}
-              {l.priceUSD !== undefined && l.priceUSD > 0 && (
-                <span style={{ color: "#f59e0b", fontSize: "10px", flexShrink: 0 }}>
-                  ${l.priceUSD < 0.001 ? l.priceUSD.toExponential(2) : l.priceUSD.toFixed(4)}
-                </span>
-              )}
-            </div>
-            {/* ── Token / cache detail row (only when data is present) ── */}
-            {(l.promptTokens !== undefined || l.cacheReadTokens !== undefined || l.cacheWriteTokens !== undefined || l.error) && (
-              <div style={{ display: "flex", gap: "10px", paddingLeft: "56px", fontSize: "10.5px", color: "#475569", flexWrap: "wrap" }}>
-                {l.promptTokens !== undefined && (
-                  <span>in <span style={{ color: "#94a3b8" }}>{l.promptTokens.toLocaleString()}</span></span>
-                )}
-                {l.completionTokens !== undefined && (
-                  <span>out <span style={{ color: "#94a3b8" }}>{l.completionTokens.toLocaleString()}</span></span>
-                )}
-                {l.cacheReadTokens !== undefined && l.cacheReadTokens > 0 && (
-                  <span>cache↩ <span style={{ color: "#34d399", fontWeight: 600 }}>{l.cacheReadTokens.toLocaleString()}</span></span>
-                )}
-                {l.cacheWriteTokens !== undefined && l.cacheWriteTokens > 0 && (
-                  <span>cache↪ <span style={{ color: "#60a5fa" }}>{l.cacheWriteTokens.toLocaleString()}</span></span>
-                )}
-                {l.cacheTier && (
-                  <span style={{ color: "#8b5cf6" }}>[{l.cacheTier}]</span>
-                )}
-                {l.error && (
-                  <span style={{ color: "#f87171" }}>{l.error}</span>
-                )}
-              </div>
-            )}
+            <span style={{ color: "#475569", flexShrink: 0 }}>{l.time.slice(11, 19)}</span>
+            <span style={{ color: LEVEL_COLORS[l.level], fontWeight: 600, width: "40px", flexShrink: 0 }}>
+              {l.level.toUpperCase()}
+            </span>
+            <span style={{ color: "#94a3b8", flexShrink: 0 }}>{l.method}</span>
+            <span style={{ color: "#cbd5e1", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {l.path}
+            </span>
+            {l.model && <span style={{ color: "#818cf8", flexShrink: 0 }}>{l.model}</span>}
+            <span style={{ color: STATUS_COLOR(l.status), flexShrink: 0 }}>{l.status}</span>
+            <span style={{ color: "#64748b", flexShrink: 0 }}>{l.duration}ms</span>
+            {l.stream && <span style={{ color: "#6366f1", fontSize: "10px", flexShrink: 0 }}>SSE</span>}
           </div>
         ))}
       </div>

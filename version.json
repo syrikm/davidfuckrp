@@ -1,0 +1,6 @@
+{
+  "version": "1.1.9",
+  "name": "Replit2Api",
+  "releaseDate": "2026-04-09",
+  "releaseNotes": "v1.1.9 — 实时定价接入 OR Models API，缓存折扣动态化，SSE 解析器修复，缓存 cache_control 续写轮次修复"
+}

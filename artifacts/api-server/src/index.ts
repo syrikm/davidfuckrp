@@ -1,12 +1,24 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { initReady, statsReady } from "./routes/proxy";
+import { cacheReady } from "./lib/responseCache";
+import { startUpdateChecker } from "./lib/updateChecker";
+import { startHotUpdateChecker } from "./lib/hotUpdater";
+
+// Fail fast: PROXY_API_KEY is required for all admin/API authentication.
+// Without it the gateway runs unauthenticated — reject at startup rather than
+// silently accepting any token. (Mirrors child proxy commit 0f47820a safeguard)
+if (!process.env["PROXY_API_KEY"]) {
+  throw new Error(
+    "PROXY_API_KEY environment variable is required but was not provided. " +
+    "Set it as a secret in the Replit Secrets panel.",
+  );
+}
 
 const rawPort = process.env["PORT"];
 
 if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
+  throw new Error("PORT environment variable is required but was not provided.");
 }
 
 const port = Number(rawPort);
@@ -15,11 +27,34 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
-    process.exit(1);
-  }
+// Wait for disk cache to be restored before accepting requests.
+// This prevents false cache misses in the first few seconds after a restart.
+await cacheReady;
 
-  logger.info({ port }, "Server listening");
+Promise.all([initReady, statsReady]).then(() => {
+  const server = app.listen(port, (err) => {
+    if (err) {
+      logger.error({ err }, "Error listening on port");
+      process.exit(1);
+    }
+    logger.info({ port }, "Server listening");
+    
+    // Start legacy update checker (for response header injection)
+    startUpdateChecker();
+    
+    // Start hot update checker (for GitHub release detection and auto-update)
+    startHotUpdateChecker();
+  });
+
+  // Zero out all Node.js HTTP server timeouts so that long-running AI requests
+  // (especially thinking/reasoning models) are never cut by Node itself.
+  // Replit's reverse proxy has a 300 s hard limit — the SSE keepalive heartbeat
+  // in proxy.ts handles that separately. These four lines cover the Node layer.
+  server.headersTimeout   = 0;
+  server.requestTimeout   = 0;
+  server.timeout          = 0;
+  server.keepAliveTimeout = 0;
+}).catch((err) => {
+  logger.error({ err }, "Failed to initialise persisted data");
+  process.exit(1);
 });

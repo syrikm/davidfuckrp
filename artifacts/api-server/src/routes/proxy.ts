@@ -6397,6 +6397,21 @@ async function handleFriendProxy({
       }
     }
 
+    // ── DeepSeek v4 data-collection unlock ────────────────────────────────────
+    // deepseek-v4-pro / deepseek-v4-flash are ONLY served by DeepSeek's own OR
+    // provider, which mandates data_collection:"allow". Without this explicit
+    // override, OR returns 404 "No endpoints available matching your guardrail
+    // restrictions and data policy" even when the caller includes the field,
+    // because the Replit AI Integrations proxy normalises the account-level
+    // policy to deny. Injecting allow before the request reaches the sub-node
+    // ensures it propagates all the way through to OpenRouter.
+    if (/^deepseek\/deepseek-v4-/i.test(model)) {
+      const existingProvider = (typeof b["provider"] === "object" && b["provider"] !== null
+        ? b["provider"] as Record<string, unknown>
+        : {});
+      b["provider"] = { data_collection: "allow", ...existingProvider };
+    }
+
     // ── OR Preferred Provider — force-route to Bedrock if configured ─────────
     // Setting orPreferredProvider="bedrock" (default) injects provider.order for
     // all anthropic/* OpenRouter model requests so OpenRouter always uses AWS Bedrock.

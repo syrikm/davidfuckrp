@@ -7,6 +7,7 @@ import { tmpdir } from "os";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { logger } from "./logger";
+import { gatewayConfig } from "./gatewayConfig";
 import { compareVersions } from "./versionUtils";
 export { compareVersions } from "./versionUtils";
 
@@ -172,7 +173,7 @@ function writeCheckCache(cachePath: string, cache: CheckCache): void {
 function githubHeaders(token?: string, etag?: string, lastModified?: string): Record<string, string> {
   const h: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "Replit2Api-HotUpdater/2.0",
+    "User-Agent": `${gatewayConfig.brand}-HotUpdater/2.0`,
   };
   if (token) h.Authorization = `token ${token}`;
   if (etag) h["If-None-Match"] = etag;
@@ -888,7 +889,7 @@ export function onWake(listener: ActivityListener): () => void {
 
 export function getDefaultConfig(): HotUpdateConfig {
   return {
-    githubRepo: process.env.GITHUB_REPO ?? "Akatsuki03/Replit2Api",
+    githubRepo: process.env.GITHUB_REPO ?? gatewayConfig.updateRepo,
     branch: process.env.GITHUB_BRANCH ?? "main",
     githubToken: process.env.GITHUB_TOKEN,
     autoUpdate: process.env.AUTO_UPDATE === "true",

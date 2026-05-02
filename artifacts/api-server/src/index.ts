@@ -48,8 +48,10 @@ Promise.all([initReady, statsReady]).then(() => {
 
   // Zero out all Node.js HTTP server timeouts so that long-running AI requests
   // (especially thinking/reasoning models) are never cut by Node itself.
-  // Replit's reverse proxy has a 300 s hard limit — the SSE keepalive heartbeat
-  // in proxy.ts handles that separately. These four lines cover the Node layer.
+  // Any upstream reverse proxy idle/total cut is handled separately by the SSE
+  // keepalive + Leg B wall timer in proxy.ts (configurable via
+  // GATEWAY_KEEPALIVE_* / GATEWAY_LEG_B_WALL_MS env vars).
+  // These four lines only cover the Node layer.
   server.headersTimeout   = 0;
   server.requestTimeout   = 0;
   server.timeout          = 0;

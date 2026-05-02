@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { gatewayConfig } from "./gatewayConfig";
 import { readLocalVersion, resolveVersionUrl, compareVersions } from "./versionUtils";
 
 // -- Shared update state (read by app.ts to inject response headers) ----------
@@ -12,7 +13,7 @@ export const updateState = {
 // -- Check function -----------------------------------------------------------
 
 const UPDATE_SOURCE_URL = process.env["UPDATE_SOURCE_URL"] ??
-  "https://github.com/sayrui/Replit2Api";
+  `https://github.com/${gatewayConfig.updateRepo}`;
 
 async function checkForUpdate(): Promise<void> {
   const local = readLocalVersion();

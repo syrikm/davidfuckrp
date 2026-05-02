@@ -346,7 +346,7 @@ function normalizePath(raw: string): string {
 // canonicalizeLogicalModel
 // ---------------------------------------------------------------------------
 // 重要架构假设（V1.1.9）：本 gateway 当前所有出站流量都通过 Friend Proxy →
-// OpenRouter（见 replit.md "后端路由"）。OpenRouter 的 Claude 模型 ID 使用
+// OpenRouter（见项目 README "后端路由"段）。OpenRouter 的 Claude 模型 ID 使用
 // **dot 形式 + 不带日期/版本后缀**，例如：
 //   - anthropic/claude-3.7-sonnet     （3.x：数字在 sonnet/opus/haiku 之前）
 //   - anthropic/claude-sonnet-4       （4.0 整数版）

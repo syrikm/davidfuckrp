@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Router, type IRouter, type NextFunction, type Request, type Response } from "express";
 import { readJson, writeJson } from "../lib/cloudPersist";
+import { gatewayConfig, gatewayTimeoutOverrides } from "../lib/gatewayConfig";
 import {
   deleteManualModelStoreEntry,
   readManualModelStore,
@@ -1312,6 +1313,10 @@ interface Backend {
   providerSlugs?: string[];
 }
 
+// Platform-tied timeouts (legBWallMs, subNodeStreamWallMs, keepaliveJobMs,
+// keepaliveAnthropicMs, keepaliveClientMs) are sourced from gatewayConfig so
+// operators on platforms without Replit's 300s/600s reverse-proxy cuts can
+// override them via env vars. Defaults preserve the original behaviour.
 const GATEWAY_TIMEOUTS = {
   upstreamLongPollMs: 3_600_000,        // true task lifetime: allow up to 1h model execution
   upstreamModelListMs: 20_000,
@@ -1321,14 +1326,14 @@ const GATEWAY_TIMEOUTS = {
   upstreamPassthroughMs: 90_000,
   subNodeJobSubmitMs: 15_000,
   subNodeJobCancelMs: 5_000,
-  subNodeStreamWallMs: 270_000,         // single upstream stream connection rotation window
+  subNodeStreamWallMs: gatewayTimeoutOverrides.subNodeStreamWallMs,  // upstream stream rotation window — fires before platform outgoing cut
   streamIdleMs: 900_000,                // upstream idle watchdog, not task lifetime
   streamReconnectDelayMs: 300,
   streamRecoverDelayMs: 500,
-  legBWallMs: 570_000,                  // client-facing reconnect window before Replit hard cut
-  keepaliveClientMs: 5_000,
-  keepaliveAnthropicMs: 10_000,
-  keepaliveJobMs: 200_000,
+  legBWallMs: gatewayTimeoutOverrides.legBWallMs,                    // client-facing reconnect window — fires before platform incoming cut
+  keepaliveClientMs: gatewayTimeoutOverrides.keepaliveClientMs,
+  keepaliveAnthropicMs: gatewayTimeoutOverrides.keepaliveAnthropicMs,
+  keepaliveJobMs: gatewayTimeoutOverrides.keepaliveJobMs,            // SSE heartbeat — must be below platform idle cut
   liveJobTtlMs: 45 * 60_000,            // resumable live-job TTL
   liveJobGcIntervalMs: 5 * 60_000,
   videoJobTtlMs: 6 * 3_600_000,
@@ -1366,7 +1371,7 @@ const JOB_TTL_MS = GATEWAY_TIMEOUTS.liveJobTtlMs;
 // ---------------------------------------------------------------------------
 // Live Job Map — fingerprint → running StreamJobEntry
 // ---------------------------------------------------------------------------
-// When Replit's 600 s hard HTTP limit fires, Leg A keeps running and its
+// When the platform's hard incoming-HTTP limit fires, Leg A keeps running and its
 // chunks stay buffered here.  The next identical POST from the client matches
 // the same fingerprint → re-attaches to the existing Leg A → replays buffered
 // chunks at network speed, then receives new real-time chunks.  Zero new AI
@@ -3089,7 +3094,7 @@ router.get("/v1/models", requireApiKey, async (_req: Request, res: Response) => 
       id: result.m.id,
       object: "model",
       created: 1700000000,
-      owned_by: unified?.provider ?? "replit-proxy",
+      owned_by: unified?.provider ?? gatewayConfig.ownedBy,
       canonical_id: unified?.canonical_id ?? result.m.id,
       ...(unified?.description ?? result.m.description ? { description: unified?.description ?? result.m.description } : {}),
       registry: toRegistryPayload(unified),
@@ -4179,7 +4184,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       let buf = "";
 
       // Use Anthropic-format "ping" event rather than an SSE comment so that
-      // Replit's reverse proxy counts it as data activity (comments can be
+      // any upstream reverse proxy counts it as data activity (comments can be
       // treated as idle by some proxies and trigger premature disconnection).
       const keepalive = setInterval(() => {
         if (!res.writableEnded) writeAndFlush(res, "event: ping\ndata: {\"type\":\"ping\"}\n\n");
@@ -5242,7 +5247,7 @@ router.patch("/v1/admin/models", requireApiKey, async (req: Request, res: Respon
 
 /**
  * Runs a streaming completion entirely in the background — not tied to any HTTP
- * response, so no 300 s Replit proxy limit applies.  Pushes SSE chunks to
+ * response, so no platform incoming-proxy limit applies.  Pushes SSE chunks to
  * job.chunks and handles its own continuation loop.
  */
 // ---------------------------------------------------------------------------
@@ -5250,9 +5255,9 @@ router.patch("/v1/admin/models", requireApiKey, async (req: Request, res: Respon
 // ---------------------------------------------------------------------------
 // Submits the request to the sub-node's /v1/jobs endpoint.  The sub-node runs
 // the LLM call in its own background (outgoing connection to AI provider is NOT
-// subject to Replit's 300 s incoming-proxy limit).  We reconnect to the sub-node's
-// /v1/jobs/:id/stream with Last-Event-ID every ~300 s — zero new LLM calls,
-// zero accumulated-text re-input, zero token waste.
+// subject to the platform's incoming-proxy limit).  We reconnect to the sub-node's
+// /v1/jobs/:id/stream with Last-Event-ID before the platform's outgoing cut —
+// zero new LLM calls, zero accumulated-text re-input, zero token waste.
 //
 // Returns true if the sub-node supported Job API and the job completed (or was
 // aborted).  Returns false if the sub-node has no Job API (404 / network error
@@ -5294,7 +5299,8 @@ async function runLegAViaSubNodeJobApi(
     };
     if (lastEventId) streamHeaders["Last-Event-ID"] = lastEventId;
 
-    // Per-connection abort: 270 s wall fires before Replit's ~300 s outgoing-connection cut.
+    // Per-connection abort: wall fires before the platform's outgoing-connection cut
+    // (default 270s, configurable via GATEWAY_SUBNODE_STREAM_WALL_MS).
     // If this fires, we reconnect to the same job using Last-Event-ID and keep streaming.
     const connAbort = new AbortController();
     const propagate  = (): void => { if (!connAbort.signal.aborted) connAbort.abort("job_abort"); };
@@ -5434,9 +5440,9 @@ async function runStreamJobBackground(
 ): Promise<void> {
   // ── Strategy: prefer sub-node Job API (zero token waste) ──────────────────
   // The sub-node runs the LLM call in its own background.  Its outgoing
-  // connection to the AI provider is NOT subject to Replit's 300 s limit.
-  // We reconnect to the sub-node's job stream every ~300 s with Last-Event-ID —
-  // no accumulated text re-input, no 3× token waste.
+  // connection to the AI provider is NOT subject to the platform's HTTP limit.
+  // We reconnect to the sub-node's job stream before the platform cut with
+  // Last-Event-ID — no accumulated text re-input, no 3× token waste.
   //
   // skipJobApi=true when this node is ITSELF handling a POST /v1/jobs request
   // (i.e. we are the sub-node).  In that case we skip Job API to avoid infinite
@@ -5549,7 +5555,7 @@ async function runStreamJobBackground(
         //        accumulated text as input every round — 3 rounds = 3× input tokens.
         //
         //   B) finish_reason = null (stream closed without reason)
-        //      → Replit cuts the mother-proxy → sub-node TCP connection at 300 s.
+        //      → The platform cuts the mother-proxy → sub-node TCP connection.
         //        The model was still generating. Auto-continue silently so the
         //        client sees an unbroken stream with no extra token overhead.
         //
@@ -5656,7 +5662,7 @@ async function runStreamJobBackground(
           if (done) break;
         }
 
-        // Case B: stream closed with no finish_reason → Replit TCP cut, model still running.
+        // Case B: stream closed with no finish_reason → platform TCP cut, model still running.
         // Treat as implicit length so the continuation loop fires.
         // We allow continuation even if contAnyOutput is false to handle cuts during thinking.
         if (finishReason === null) finishReason = "length";
@@ -5747,7 +5753,8 @@ router.post("/v1/jobs", requireApiKey, async (req: Request, res: Response, next:
 });
 
 // GET /v1/jobs/:id/stream — SSE stream with Last-Event-ID reconnect support
-// Keepalive every 200 s so Replit's proxy doesn't cut idle connections.
+// Keepalive cadence (default 200s, configurable via GATEWAY_KEEPALIVE_JOB_MS)
+// so the upstream proxy doesn't cut idle connections.
 router.get("/v1/jobs/:id/stream", requireApiKey, async (req: Request, res: Response) => {
   const job = jobStore.get(String(req.params.id));
   if (!job) {
@@ -5761,7 +5768,8 @@ router.get("/v1/jobs/:id/stream", requireApiKey, async (req: Request, res: Respo
   res.setHeader("X-Accel-Buffering", "no");
   if (res.socket) { res.socket.setNoDelay(true); res.socket.setTimeout(0); }
 
-  // Keepalive every 200 s — below Replit's 300 s proxy idle cut
+  // Keepalive cadence — must stay below the platform's idle-connection cut
+  // (default 200s, configurable via GATEWAY_KEEPALIVE_JOB_MS)
   const keepalive = setInterval(() => {
     if (!res.writableEnded) {
       res.write(`data: ${JSON.stringify({ id: `ka-${Date.now()}`, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: job.model, choices: [] })}\n\n`);
@@ -6448,21 +6456,22 @@ async function handleFriendProxy({
   //
   //  Leg A  (Mother proxy → Sub-node)  managed by runStreamJobBackground:
   //    • Calls sub-node's standard /v1/chat/completions — no special endpoints needed.
-  //    • On ECONNRESET / network error (Replit ~300 s outgoing cut): automatically
+  //    • On ECONNRESET / network error (platform outgoing cut): automatically
   //      retries with a continuation message.  Up to MAX_CONT rounds.
   //    • All received chunks are stored in an internal job store (in-memory).
   //
   //  Leg B  (Mother proxy → SillyTavern / client)  managed below:
   //    • Reads chunks from the internal job store via EventEmitter push.
   //    • Sends 15 s SSE keepalive so intermediate proxies don't close the idle leg.
-  //    • 570 s wall timer: fires 30 s before Replit's 600 s hard HTTP cut.
+  //    • Leg B wall timer (default 570s, configurable via GATEWAY_LEG_B_WALL_MS):
+  //      fires before the platform's hard incoming-HTTP cut.
   //      When it fires: closes TCP cleanly (FIN only, no finish_reason) while
   //      Leg A keeps running.  Next identical request re-attaches to the same
   //      job and replays buffered chunks — ZERO new LLM calls.
   //    • On genuine client disconnect (user pressed stop): abort Leg A immediately.
   //
-  // Result: one LLM call per user turn, unlimited HTTP reconnects across Replit's
-  // 600 s hard limit.  Completely transparent to SillyTavern / NewAPI.
+  // Result: one LLM call per user turn, unlimited HTTP reconnects across any
+  // platform's hard HTTP limit.  Completely transparent to SillyTavern / NewAPI.
   //
 
   // ── Leg A: Create or re-attach to existing job ────────────────────────────
@@ -6561,12 +6570,14 @@ async function handleFriendProxy({
     safeWrite(`data: ${JSON.stringify({ object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [] })}\n\n`);
   }, GATEWAY_TIMEOUTS.keepaliveClientMs);
 
-  // ── Leg B 570 s wall timer ─────────────────────────────────────────────────
-  // Replit enforces a hard 600 s absolute limit on incoming HTTP connections.
-  // Fire 30 s early: set legBWallFired, emit "legb_wall" to exit the drain
-  // loop, then close TCP with FIN only — no finish_reason, no [DONE].
-  // Leg A keeps running.  Next identical POST → same liveFp → liveJobMap hit
-  // → replay buffered chunks at full speed → ZERO new LLM calls.
+  // ── Leg B wall timer ───────────────────────────────────────────────────────
+  // Many hosting platforms enforce a hard absolute limit on incoming HTTP
+  // connections (Replit: 600s). Fire before that limit so we can:
+  // set legBWallFired, emit "legb_wall" to exit the drain loop, then close
+  // TCP with FIN only — no finish_reason, no [DONE]. Leg A keeps running.
+  // Next identical POST → same liveFp → liveJobMap hit → replay buffered
+  // chunks at full speed → ZERO new LLM calls.
+  // Default 570s, configurable via GATEWAY_LEG_B_WALL_MS.
   const LEG_B_WALL_MS = GATEWAY_TIMEOUTS.legBWallMs;
   const legBWallTimer = setTimeout(() => {
     legBWallFired = true;
@@ -6793,8 +6804,8 @@ router.post("/v1/videos", requireApiKey, async (req: Request, res: Response) => 
         createdAt: Date.now(),
       });
 
-      // Build polling_url from the incoming request so it survives Replit's
-      // reverse proxy (x-forwarded-proto / x-forwarded-host).
+      // Build polling_url from the incoming request so it survives any
+      // upstream reverse proxy (x-forwarded-proto / x-forwarded-host).
       const proto    = ((req.headers["x-forwarded-proto"] as string | undefined) ?? "https").split(",")[0].trim();
       const host     = (req.headers["x-forwarded-host"] as string | undefined) ?? req.get("host") ?? "localhost";
       const mount    = req.path.endsWith("/v1/videos") ? req.path.slice(0, -"/v1/videos".length) : "";

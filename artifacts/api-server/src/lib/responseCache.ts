@@ -118,7 +118,7 @@ let enabled = true;
 //     point of the disk dump is fast warm-restart on the *same* host, which
 //     local fs already provides on every supported deployment target
 //     (including ephemeral cloud — the cache simply rebuilds).
-//   * The legacy plan (脱离-replit-平台总规划.md) listed `.cache/` among
+//   * The legacy platform-decoupling plan listed `.cache/` among
 //     "process.cwd() writes" but that was a structural inventory; caches are
 //     explicitly excluded from the storage-adapter migration.
 //

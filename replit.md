@@ -158,6 +158,14 @@
 | `STORAGE_S3_PREFIX` | S3 key 前缀，默认 `config/` |
 | `STORAGE_S3_FORCE_PATH_STYLE` | 设为 `true` 启用 path-style URL（MinIO 等需要） |
 | `STORAGE_GCS_BUCKET` / `STORAGE_GCS_PREFIX` / `GCS_PROJECT_ID` / `GOOGLE_APPLICATION_CREDENTIALS` | `gcs` 模式（标准服务账号，非 Replit sidecar） |
+| `GATEWAY_BRAND` | 可选，品牌字符串（默认 `ai-proxy-gateway`），出现在升级 User-Agent 与默认 `owned_by` 中 |
+| `GATEWAY_OWNED_BY` | 可选，覆盖 OpenAI 模型清单 `owned_by` 字段缺省值（默认等于 `GATEWAY_BRAND`） |
+| `GATEWAY_UPDATE_REPO` | 可选，热更新源 GitHub `owner/repo`（默认 `Akatsuki03/Replit2Api`，向后兼容） |
+| `GATEWAY_LEG_B_WALL_MS` | 可选，客户端连接续接墙（默认 570000ms = 570s，针对 Replit 600s 切断；其它平台可放大） |
+| `GATEWAY_SUBNODE_STREAM_WALL_MS` | 可选，上游 SSE 连接重连墙（默认 270000ms = 270s，针对 Replit 300s 出站切断） |
+| `GATEWAY_KEEPALIVE_JOB_MS` | 可选，Job SSE 心跳间隔（默认 200000ms，必须低于平台 idle 切断） |
+| `GATEWAY_KEEPALIVE_ANTHROPIC_MS` | 可选，Anthropic SSE `event: ping` 心跳间隔（默认 10000ms） |
+| `GATEWAY_KEEPALIVE_CLIENT_MS` | 可选，Leg B（mother→client）OpenAI 心跳间隔（默认 5000ms） |
 
 ### 推荐云存储：Cloudflare R2（免费）
 
@@ -173,6 +181,25 @@ STORAGE_S3_SECRET_ACCESS_KEY=<r2-secret-key>
 ```
 
 获取凭证：Cloudflare Dashboard → R2 → Manage R2 API Tokens → Create API Token → 选择 Object Read & Write 权限 → 选定 bucket → 创建后立即复制 Access Key ID / Secret Access Key。Account ID 在 R2 Overview 页面可见。
+
+## 脱离 Replit 平台（Stage A → D 全部完成）
+
+mother 现在是平台无关的纯 Node ≥ 20 服务，可在任何主机上 `pnpm dev` 起服务，不依赖任何 Replit 平台 API。
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| A | `process.cwd()` 写入巡查 + `responseCache` 决策注释 | ✅ |
+| B | `lib/storage/` adapter 层（local-fs / S3 / R2 / GCS / Replit），`cloudPersist.ts` 瘦身为薄包装；`unifiedModelManager` 全量走 adapter；drain-loop 修复 | ✅ |
+| C | 清理代码中残留 Replit 字面量：`owned_by` 默认改 `gatewayConfig.ownedBy`；升级 User-Agent / GitHub repo 改 env；用户文案 `"upstream Replit instance"` → `"upstream gateway instance"`；`source: "replit"` → `"bundle"`；多处 `"Replit's 300s/600s"` 注释改平台中立措辞 | ✅ |
+| D | `routes/proxy.ts` 中 5 个 Replit-tuned 硬编码超时（`legBWallMs` / `subNodeStreamWallMs` / `keepaliveJobMs` / `keepaliveAnthropicMs` / `keepaliveClientMs`）改为 env 可配置（`GATEWAY_*` 系列），默认值不变 | ✅ |
+
+**单一配置真相源：** `artifacts/api-server/src/lib/gatewayConfig.ts`。所有品牌字符串、平台超时都集中读取。Stage C/D 是纯 additive 改动 —— 既有 Replit 部署不受任何影响（默认值与原硬编码值 1:1）。
+
+**健康探针：** `GET /api/setup-status` 现在返回 `storageBackend` 字段（adapter `displayName`），可直接看到生效的存储后端，例如 `local-fs:./data` / `s3:my-bucket/config/` / `replit-app-storage:<bucket>/config_dev/`。
+
+**Stage B 数据迁移提醒：** 旧部署若已自定义模型分组等持久化文件，第一次起服务时会从 adapter 新位置读，旧文件需手动搬移：
+- 本地后端：`./data/disabled_models.json`、`./data/model-groups.json`（之前在仓库根）
+- Replit 后端：`<bucket>/config_dev/<file>` (dev) 或 `<bucket>/config/<file>` (prod，`REPLIT_DEPLOYMENT` 环境下)
 
 ## 版本
 

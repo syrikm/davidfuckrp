@@ -185,10 +185,15 @@ STORAGE_S3_SECRET_ACCESS_KEY=<r2-secret-key>
 - `dynamic_backends.json` — 动态 Friend Proxy 节点列表
 - `server_settings.json` — 服务器设置（含 SillyTavern 模式开关）
 - `usage_stats.json` — 用量统计（按节点 + 按模型，含 cacheReadTokens / cacheWriteTokens，10s 去抖 + 5min 安全写入）
-- `disabled_models.json` — 禁用模型列表
+- `disabled_models.json` — 禁用模型列表（由 `lib/unifiedModelManager.ts` 通过 cloudPersist 写入）
+- `model-groups.json` — 结构化模型分组配置（由 `lib/unifiedModelManager.ts` 通过 cloudPersist 写入）
 - `managed_models.json` / `custom_openrouter_models.json` / `model_routes.json` / `routing_settings.json` / `stability_state.json` — 模型管理与路由配置
 
 **Stage B 完成（V1.1.9）：** 新增 `lib/storage/{adapter,local,s3,gcs,replit,index}.ts` 六文件 adapter 层，`cloudPersist.ts` 改为 30 行薄包装；mother 默认（无 env）即可在 vanilla Node 容器跑，写入 `./data/`。R2 通过 S3 adapter 完整支持。
+
+**Stage B 收尾审计（V1.1.9 后续）：** `lib/unifiedModelManager.ts` 原使用 `fs.promises.writeFile(process.cwd()/disabled_models.json)` 等绕过 adapter 写持久化文件，已迁移到 `cloudPersist.readJson` / `writeJson`，确保 `disabled_models.json` 与 `model-groups.json` 在云端 ephemeral host 上也能跨重启存活。已通过实测验证：PATCH `/v1/admin/models` 禁用模型 → 等待 1.5s debounce → 重启服务 → 模型仍为 disabled。
+
+**故意保留为本地缓存：** `lib/responseCache.ts` 的 `.cache/responses.json` 是 LRU 响应缓存（不是配置），coldstart 空缓存完全正确（每次 miss 重新拉取上游），不走 adapter 是为避免每次 flush 都消耗云出口费用 + 增加延迟。文件首部已加详细注释说明该决策。
 
 **启动 hydration（已修复 race）：** `routes/settings.ts` 使用 **top-level await** 在模块加载阶段从 storage 读回 `server_settings.json`，因此 `getSillyTavernMode()`（被 `proxy.ts` 热路径同步调用）从首次调用即返回正确的持久值，不存在"先读到默认 false 后被持久值覆盖"的窗口。代价：冷启动多一次 storage `read` —— 本地几毫秒、云端几十毫秒。`backendPool` / `manualModelStore` 仍使用 fire-and-forget 异步 hydrate（其调用方为 admin endpoint，不在主路径，且首个写请求几乎一定在 hydrate 之后到达）。
 

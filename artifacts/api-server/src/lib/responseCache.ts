@@ -105,11 +105,33 @@ let enabled = true;
 // Disk persistence
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Disk persistence for the response cache.
+//
+// DELIBERATELY LOCAL-ONLY (does NOT route through the cloudPersist storage
+// adapter). Rationale:
+//   * This file is a *cache*, not user configuration. A cold start with an
+//     empty cache is fully correct — every miss is just re-fetched from the
+//     upstream provider. There is no data loss if the file disappears.
+//   * Routing through a cloud adapter (R2 / S3 / GCS) would multiply per-
+//     request egress costs and add latency to every cache flush. The whole
+//     point of the disk dump is fast warm-restart on the *same* host, which
+//     local fs already provides on every supported deployment target
+//     (including ephemeral cloud — the cache simply rebuilds).
+//   * The legacy plan (脱离-replit-平台总规划.md) listed `.cache/` among
+//     "process.cwd() writes" but that was a structural inventory; caches are
+//     explicitly excluded from the storage-adapter migration.
+//
+// If a future deployment target truly forbids ANY local writes, set
+// `RESPONSE_CACHE_PERSIST=false` (TODO — guard not yet implemented; current
+// behavior is to attempt and silently no-op on EROFS via the catch below).
+// ---------------------------------------------------------------------------
+
 const CACHE_DIR  = join(process.cwd(), ".cache");
 const CACHE_FILE = join(CACHE_DIR, "responses.json");
 const CACHE_TMP  = join(CACHE_DIR, "responses.json.tmp");
 
-try { mkdirSync(CACHE_DIR, { recursive: true }); } catch { /* already exists */ }
+try { mkdirSync(CACHE_DIR, { recursive: true }); } catch { /* already exists or read-only fs */ }
 
 let diskWriteTimer: ReturnType<typeof setTimeout> | null = null;
 let diskWritePending = false;

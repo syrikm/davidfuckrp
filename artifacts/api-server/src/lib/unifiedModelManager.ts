@@ -19,8 +19,7 @@
  *   - vcpfuckcachefork-github (v1.2.0)
  */
 
-import fs from "fs";
-import path from "path";
+import { readJson, writeJson } from "./cloudPersist";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,11 +38,18 @@ export interface ModelGroup {
 }
 
 // ---------------------------------------------------------------------------
-// File paths
+// Persistence file basenames
 // ---------------------------------------------------------------------------
+//
+// These two files hold user configuration (model groups + simple deny list)
+// and MUST survive host restarts on any deployment target — that's why we
+// route through the cloudPersist adapter (local-fs / S3 / R2 / GCS / Replit
+// App Storage), not raw `fs.writeFile` to `process.cwd()`. On vanilla cloud
+// hosts (Cloudflare Workers, fly.io, Render free tier) the working directory
+// is ephemeral, so a raw fs write would silently lose data on every restart.
 
-const DISABLED_MODELS_PATH = path.join(process.cwd(), "disabled_models.json");
-const MODEL_GROUPS_PATH = path.join(process.cwd(), "model-groups.json");
+const DISABLED_MODELS_FILE = "disabled_models.json";
+const MODEL_GROUPS_FILE = "model-groups.json";
 
 // ---------------------------------------------------------------------------
 // Async Mutex (lightweight, no external dependencies)
@@ -204,21 +210,6 @@ function mergeWithDefaults(saved: ModelGroup[]): ModelGroup[] {
   });
 }
 
-async function readJsonFile<T>(filePath: string): Promise<T | null> {
-  try {
-    const raw = await fs.promises.readFile(filePath, "utf-8");
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
-  const tmpPath = `${filePath}.tmp`;
-  await fs.promises.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
-  await fs.promises.rename(tmpPath, filePath);
-}
-
 // ---------------------------------------------------------------------------
 // Debounced batch writer for disk I/O reduction
 // ---------------------------------------------------------------------------
@@ -238,26 +229,52 @@ function scheduleBatchWrite(): void {
   if (_writeTimer) clearTimeout(_writeTimer);
   _writeTimer = setTimeout(() => {
     _writeTimer = null;
-    flushBatchWrite();
+    void flushBatchWrite();
   }, DEBOUNCE_MS);
 }
 
 async function flushBatchWrite(): Promise<void> {
+  // If a flush is already in flight, just wait for it. The new pending data
+  // (set by the caller before invoking us) will be picked up by the post-
+  // flush drain in the in-flight invocation below — we do NOT need to start
+  // a competing flush here, and we also must NOT silently drop the data by
+  // returning early without a follow-up. The drain at the bottom of the
+  // active flush handles every queued mutation that arrived during its run.
   if (_pendingWrite) return _pendingWrite;
-  _pendingWrite = (async () => {
-    const groupsToWrite = _pendingGroups;
-    const disabledToWrite = _pendingDisabled;
-    _pendingGroups = null;
-    _pendingDisabled = null;
 
-    const writes: Promise<void>[] = [];
-    if (groupsToWrite) {
-      writes.push(writeJsonFile(MODEL_GROUPS_PATH, groupsToWrite));
+  _pendingWrite = (async () => {
+    // Drain loop: keep flushing until no new mutations arrive during a write.
+    // Without this, if a mutation lands while we are awaiting a slow cloud-
+    // storage PUT, the next debounce timer would see `_pendingWrite` truthy,
+    // bail out, and leave the new pending data unscheduled until *another*
+    // mutation kicks off another timer — i.e. potential indefinite delay.
+    while (_pendingGroups || _pendingDisabled) {
+      const groupsToWrite = _pendingGroups;
+      const disabledToWrite = _pendingDisabled;
+      _pendingGroups = null;
+      _pendingDisabled = null;
+
+      const writes: Promise<void>[] = [];
+      if (groupsToWrite) {
+        // Background flush — log-and-swallow so a transient cloud-storage
+        // hiccup doesn't bubble into an uncaught promise and crash the
+        // worker. The synchronous saveModelGroups path below still rethrows
+        // for callers that need to surface persistence errors.
+        writes.push(
+          writeJson(MODEL_GROUPS_FILE, groupsToWrite).catch((err) => {
+            console.error(`[unifiedModelManager] background flush of ${MODEL_GROUPS_FILE} failed:`, err);
+          }),
+        );
+      }
+      if (disabledToWrite) {
+        writes.push(
+          writeJson(DISABLED_MODELS_FILE, [...disabledToWrite]).catch((err) => {
+            console.error(`[unifiedModelManager] background flush of ${DISABLED_MODELS_FILE} failed:`, err);
+          }),
+        );
+      }
+      await Promise.all(writes);
     }
-    if (disabledToWrite) {
-      writes.push(writeJsonFile(DISABLED_MODELS_PATH, [...disabledToWrite]));
-    }
-    await Promise.all(writes);
   })().finally(() => {
     _pendingWrite = null;
   });
@@ -272,7 +289,7 @@ async function loadDisabledModels(): Promise<Set<string>> {
   if (_disabledModelsCache) return _disabledModelsCache;
   return _disabledMutex.run(async () => {
     if (_disabledModelsCache) return _disabledModelsCache;
-    const raw = await readJsonFile<string[]>(DISABLED_MODELS_PATH);
+    const raw = await readJson<string[]>(DISABLED_MODELS_FILE);
     _disabledModelsCache = new Set(raw ?? []);
     return _disabledModelsCache;
   });
@@ -286,7 +303,7 @@ function scheduleDisabledModelsWrite(set: Set<string>): void {
 async function saveDisabledModels(set: Set<string>): Promise<void> {
   _disabledModelsCache = null;
   _pendingDisabled = null;
-  await writeJsonFile(DISABLED_MODELS_PATH, [...set]);
+  await writeJson(DISABLED_MODELS_FILE, [...set]);
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +314,7 @@ async function loadModelGroups(): Promise<ModelGroup[]> {
   if (_modelGroupsCache) return _modelGroupsCache;
   return _groupsMutex.run(async () => {
     if (_modelGroupsCache) return _modelGroupsCache;
-    const saved = await readJsonFile<ModelGroup[]>(MODEL_GROUPS_PATH);
+    const saved = await readJson<ModelGroup[]>(MODEL_GROUPS_FILE);
     _modelGroupsCache = saved ? mergeWithDefaults(saved) : DEFAULT_GROUPS.map(g => ({ ...g, models: g.models.map(m => ({ ...m })) }));
     return _modelGroupsCache;
   });
@@ -311,7 +328,7 @@ function scheduleGroupsWrite(groups: ModelGroup[]): void {
 async function saveModelGroups(groups: ModelGroup[]): Promise<void> {
   _modelGroupsCache = null;
   _pendingGroups = null;
-  await writeJsonFile(MODEL_GROUPS_PATH, groups);
+  await writeJson(MODEL_GROUPS_FILE, groups);
 }
 
 // ---------------------------------------------------------------------------

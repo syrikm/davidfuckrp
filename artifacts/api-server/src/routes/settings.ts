@@ -1,37 +1,44 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { resolve } from "path";
 import { getProxyApiKey } from "../lib/backendPool";
+import { readJson, writeJson } from "../lib/cloudPersist";
 
 const router: IRouter = Router();
 
 // ---------------------------------------------------------------------------
-// Settings persistence
+// Settings persistence — backed by the pluggable storage adapter layer
+// (local-fs / S3 / R2 / GCS / Replit App Storage) via cloudPersist.
+// File: server_settings.json
+//
+// Initial in-memory state defaults to safe values; an async hydrate runs at
+// module load to overlay persisted values. Same pattern as backendPool and
+// manualModelStore — a few-millisecond race with early GETs is acceptable
+// (the endpoint just reports the default until hydration completes).
 // ---------------------------------------------------------------------------
 
-const SETTINGS_FILE = resolve(process.cwd(), "server_settings.json");
+const SETTINGS_FILE = "server_settings.json";
 
 interface ServerSettings {
   sillyTavernMode: boolean;
 }
 
-function loadSettings(): ServerSettings {
+const settings: ServerSettings = { sillyTavernMode: false };
+
+void (async () => {
   try {
-    if (existsSync(SETTINGS_FILE)) {
-      const raw = JSON.parse(readFileSync(SETTINGS_FILE, "utf8")) as Partial<ServerSettings>;
-      return {
-        sillyTavernMode: typeof raw.sillyTavernMode === "boolean" ? raw.sillyTavernMode : false,
-      };
+    const raw = await readJson<Partial<ServerSettings>>(SETTINGS_FILE);
+    if (raw && typeof raw.sillyTavernMode === "boolean") {
+      settings.sillyTavernMode = raw.sillyTavernMode;
     }
-  } catch {}
-  return { sillyTavernMode: false };
-}
+  } catch (err) {
+    console.error(`[settings] failed to hydrate ${SETTINGS_FILE}:`, err);
+  }
+})();
 
 function saveSettings(s: ServerSettings): void {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2)); } catch {}
+  writeJson(SETTINGS_FILE, s).catch((err) => {
+    console.error(`[settings] failed to persist ${SETTINGS_FILE}:`, err);
+  });
 }
-
-const settings: ServerSettings = loadSettings();
 
 export function getSillyTavernMode(): boolean {
   return settings.sillyTavernMode;

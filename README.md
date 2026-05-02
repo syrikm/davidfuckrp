@@ -121,7 +121,7 @@ pnpm install
 pnpm --filter @workspace/api-server run dev
 ```
 
-访问 `http://localhost:8080/api/health` 应返回 200。
+访问 `http://localhost:8080/api/healthz` 应返回 200。
 
 或本地 Docker：
 

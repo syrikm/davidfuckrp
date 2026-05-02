@@ -2,7 +2,7 @@ import express, { type Express, type Request, type Response, type NextFunction }
 import cors from "cors";
 import pinoHttp from "pino-http";
 import { readFileSync, existsSync } from "fs";
-import { resolve } from "path";
+import { resolve, join } from "path";
 import router from "./routes";
 import proxyRouter from "./routes/proxy";
 import { logger } from "./lib/logger";
@@ -79,16 +79,59 @@ app.use(
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Friendly root response — this is a backend-only API gateway, no UI on `/`.
-// Without this people hit the deployed URL and get a bare 404, which looks broken.
-// Returns a JSON usage hint with the live endpoint paths.
+// ---------------------------------------------------------------------------
+// Portal UI (api-portal SPA) — bundled into the same image at build time.
+// ---------------------------------------------------------------------------
+// Dockerfile builds artifacts/api-portal with `vite build base=/portal/` and
+// copies the output to /app/portal-dist. The portal calls the API via
+// `${window.location.origin}/api/...`, so serving it from the same origin as
+// the API means zero CORS / config friction.
+//
+// In local dev (no Docker) portal-dist won't exist → portalEnabled stays false
+// and `/` falls back to the JSON info response.
+// ---------------------------------------------------------------------------
+const portalDist = resolve(process.cwd(), "portal-dist");
+const portalEnabled = existsSync(join(portalDist, "index.html"));
+
+if (portalEnabled) {
+  // Static assets first. fallthrough:true (default) lets the SPA fallback
+  // below handle "deep links" like /portal/dashboard that aren't real files.
+  app.use(
+    "/portal",
+    express.static(portalDist, {
+      index: "index.html",
+      // Hashed bundles in /portal/assets/* are immutable — long cache OK.
+      // index.html itself is cached short so users pick up new deploys fast.
+      maxAge: "7d",
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith("index.html")) {
+          res.setHeader("Cache-Control", "no-cache");
+        }
+      },
+    }),
+  );
+
+  // SPA fallback: any unmatched /portal/* request → index.html so client-side
+  // routing (wouter) can take over.
+  app.use("/portal", (_req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(join(portalDist, "index.html"));
+  });
+}
+
+// Root: redirect to portal if bundled, otherwise return JSON info (useful for
+// curl / uptime monitors and for builds without the UI compiled in).
 app.get("/", (_req: Request, res: Response) => {
+  if (portalEnabled) {
+    return res.redirect(302, "/portal/");
+  }
   res.json({
     name: "davidfuckrp",
-    description: "AI proxy gateway (mother). Backend-only — no UI on this URL.",
+    description: "AI proxy gateway (mother).",
     version: hotUpdateState.currentVersion !== "unknown"
       ? hotUpdateState.currentVersion
       : PROXY_VERSION_STATIC,
+    portal: "(not bundled in this build)",
     endpoints: {
       health:        "/api/healthz",
       setup_status:  "/api/setup-status",

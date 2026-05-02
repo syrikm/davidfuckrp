@@ -91,15 +91,6 @@ export interface BackendPoolEntry {
   providerSlugs?: string[];
 }
 
-/** Virtual local backend — routes to Replit AI Integrations directly. */
-export interface LocalBackendPoolEntry {
-  kind: "local";
-  label: "local";
-  /** Stable pseudo-URL used for rendezvous hashing only; not a real HTTP endpoint. */
-  url: "local://self";
-  apiKey: string;
-}
-
 interface HealthEntry {
   healthy: boolean;
   checkedAt: number;

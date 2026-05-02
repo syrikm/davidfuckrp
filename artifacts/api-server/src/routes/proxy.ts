@@ -31,7 +31,7 @@ import {
   setDynamicBackends,
   setHealth,
 } from "../lib/backendPool";
-import { getSillyTavernMode, getEnableLocalNode } from "./settings";
+import { getSillyTavernMode } from "./settings";
 import {
   hashRequest, cacheGet, cacheSet, getCacheStats,
   setCacheEnabled, setCacheTtl, setCacheMaxEntries, cacheClear,
@@ -1150,9 +1150,9 @@ function buildAbsoluteProviderBlock(
   return out;
 }
 
-// fetchOpenRouterModels — NEVER uses Replit AI Integrations.
-// All model-list queries go through a configured friend proxy sub-node so that
-// zero Replit integration credentials are ever touched by this gateway process.
+// fetchOpenRouterModels — model-list queries are forwarded through a
+// configured friend proxy sub-node. The mother gateway never calls any
+// upstream AI provider directly.
 async function fetchOpenRouterModels(): Promise<void> {
   const proxyApiKey = getProxyApiKey();
 
@@ -1286,86 +1286,23 @@ setTimeout(fetchORPricingDirect, 6_000);
 setInterval(fetchORPricingDirect, 6 * 60 * 60 * 1_000);
 
 // ---------------------------------------------------------------------------
-// Backend pool — combines friend proxy sub-nodes with optional local node.
-// Local node routes directly to Replit AI Integrations (AI_INTEGRATIONS_* env
-// vars).  Enabled by default when AI_INTEGRATIONS env vars are present and the
-// "启用本地节点" toggle is on.
+// Backend pool — friend proxy sub-nodes only.  All upstream traffic is
+// forwarded through configured sub-nodes; the mother gateway never calls any
+// AI provider directly.
 // ---------------------------------------------------------------------------
 
-type Backend =
-  | {
-      kind: "friend";
-      label: string;
-      url: string;
-      apiKey: string;
-      /**
-       * Set of OpenRouter provider slugs this sub-node is known to be able
-       * to reach.  Mirrors BackendPoolEntry.providerSlugs (see backendPool.ts
-       * for semantics).  When undefined the node has not reported any model
-       * list and is treated as capable of serving any locked provider.
-       */
-      providerSlugs?: string[];
-    }
-  | { kind: "local";  label: "local"; url: "local://self"; apiKey: string };
-
-// ---------------------------------------------------------------------------
-// Local backend helpers
-// ---------------------------------------------------------------------------
-
-/** Detect which AI_INTEGRATIONS provider to use for a given model ID.
- *  Priority: OpenRouter (unified, all providers) → OpenAI → Anthropic → Gemini.
- *  For Anthropic-native models, the Anthropic integration is preferred only when
- *  OpenRouter is absent (because OR supports Anthropic via OpenAI-compat format,
- *  avoiding a format conversion on our side).
- */
-function getLocalRouteForModel(model: string): {
-  baseUrl: string;
+interface Backend {
+  kind: "friend";
+  label: string;
+  url: string;
   apiKey: string;
   /**
-   * Request format expected by this endpoint.
-   * - "openai" → POST /v1/chat/completions, OpenAI JSON body
-   * - "anthropic" → POST /v1/messages, Anthropic JSON body  (native Anthropic SDK format)
+   * Set of OpenRouter provider slugs this sub-node is known to be able
+   * to reach.  Mirrors BackendPoolEntry.providerSlugs (see backendPool.ts
+   * for semantics).  When undefined the node has not reported any model
+   * list and is treated as capable of serving any locked provider.
    */
-  format: "openai" | "anthropic";
-} | null {
-  const orUrl = process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"];
-  const orKey = process.env["AI_INTEGRATIONS_OPENROUTER_API_KEY"] ?? "dummy";
-  const oaUrl = process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"];
-  const oaKey = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] ?? "dummy";
-  const anUrl = process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"];
-  const anKey = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"] ?? "dummy";
-
-  // OpenRouter handles all providers via OpenAI-compat — use it first.
-  if (orUrl) return { baseUrl: orUrl.replace(/\/+$/, ""), apiKey: orKey, format: "openai" };
-
-  const isClaudeModel = /^claude[-\s]|^anthropic\//i.test(model);
-  // Anthropic native integration for Claude models when OR not available.
-  if (isClaudeModel && anUrl) return { baseUrl: anUrl.replace(/\/+$/, ""), apiKey: anKey, format: "anthropic" };
-
-  // Fall back to OpenAI integration for all other models.
-  if (oaUrl) return { baseUrl: oaUrl.replace(/\/+$/, ""), apiKey: oaKey, format: "openai" };
-  // Last resort: Anthropic integration (even for non-Claude — will fail at API level).
-  if (anUrl) return { baseUrl: anUrl.replace(/\/+$/, ""), apiKey: anKey, format: "anthropic" };
-
-  return null;
-}
-
-/** Return a local Backend entry if AI_INTEGRATIONS env vars are present and
- *  the enableLocalNode setting is on.  Returns null otherwise. */
-function buildLocalBackend(): Backend & { kind: "local" } | null {
-  if (!getEnableLocalNode()) return null;
-  // Check at least one integration URL is present.
-  const anyUrl = process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"]
-    || process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"]
-    || process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"]
-    || process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
-  if (!anyUrl) return null;
-  // API key: use OR key if present, else OA key, else anthropic key.
-  const apiKey = process.env["AI_INTEGRATIONS_OPENROUTER_API_KEY"]
-    ?? process.env["AI_INTEGRATIONS_OPENAI_API_KEY"]
-    ?? process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"]
-    ?? "dummy";
-  return { kind: "local", label: "local", url: "local://self", apiKey };
+  providerSlugs?: string[];
 }
 
 const GATEWAY_TIMEOUTS = {
@@ -1590,7 +1527,6 @@ export const initReady: Promise<void> = (async () => {
   if (disabledCount > 0) console.log(`[init] loaded ${disabledCount} disabled model(s) via unifiedModelManager`);
   if (savedRouting && typeof savedRouting === "object") {
     if (typeof savedRouting.fakeStream === "boolean") routingSettings.fakeStream = savedRouting.fakeStream;
-    // localEnabled / localFallback legacy fields — ignored; use /api/settings/local-node instead.
   }
   if (Array.isArray(savedCustomModels)) {
     customOpenRouterModels = savedCustomModels;
@@ -1667,7 +1603,7 @@ let requestCounter = 0;
 // Cache-affinity consistent hashing
 //
 // Anthropic prompt caching keys on: API-key + model + exact prefix bytes.
-// Each friend proxy sub-node has its own Replit AI Integrations key, so
+// Each friend proxy sub-node has its own upstream API credentials, so
 // caching is per-sub-node.  Simple round-robin scatters requests across
 // sub-nodes and destroys cache locality.
 //
@@ -2462,9 +2398,8 @@ function pickBackendRendezvous(
 // ---------------------------------------------------------------------------
 
 function pickBackend(): Backend | null {
-  const pool = buildFullBackendPool();
+  const pool = buildBackendPool();
   if (pool.length === 0) return null;
-  // Prefer non-rate-limited backends (local://self is never rate-limited)
   const available = pool.filter((b) => !isRateLimited(b.url));
   const candidates = available.length > 0 ? available : pool;
   const backend = candidates[requestCounter % candidates.length];
@@ -2473,20 +2408,16 @@ function pickBackend(): Backend | null {
 }
 
 /**
- * Filter a pool by absolute-routing provider slug if one is set.  Local
- * backends never advertise specific OpenRouter provider slugs, so when an
- * absolute lock is in effect we exclude `kind: "local"` entries — the local
- * node forwards to AI Integrations and cannot guarantee the locked OR
- * sub-channel.  Friend entries with `providerSlugs == undefined` are
- * preserved (legacy compatibility, see BackendPoolEntry semantics).
+ * Filter a pool by absolute-routing provider slug if one is set.  Friend
+ * entries with `providerSlugs == undefined` are preserved (legacy
+ * compatibility, see BackendPoolEntry semantics).
  */
 function applyAbsoluteRoutingFilter(
   pool: Backend[],
   providerSlug: string | undefined,
 ): Backend[] {
   if (!providerSlug) return pool;
-  const friendsOnly = pool.filter((b) => b.kind === "friend") as Array<Extract<Backend, { kind: "friend" }>>;
-  return filterBackendPoolByProvider(friendsOnly, providerSlug);
+  return filterBackendPoolByProvider(pool, providerSlug);
 }
 
 /**
@@ -2499,13 +2430,13 @@ function checkAbsoluteRoutingCapability(providerSlug: string): {
   poolSize: number;
   eligibleSize: number;
 } {
-  const pool = buildFullBackendPool();
+  const pool = buildBackendPool();
   const eligible = applyAbsoluteRoutingFilter(pool, providerSlug);
   return { canServe: eligible.length > 0, poolSize: pool.length, eligibleSize: eligible.length };
 }
 
 function pickBackendForCache(fingerprint: string, providerSlug?: string): Backend | null {
-  const pool = applyAbsoluteRoutingFilter(buildFullBackendPool(), providerSlug);
+  const pool = applyAbsoluteRoutingFilter(buildBackendPool(), providerSlug);
   return pickBackendRendezvous(pool, fingerprint);
 }
 
@@ -2514,15 +2445,13 @@ function pickBackendForCacheExcluding(
   exclude: Set<string>,
   providerSlug?: string,
 ): Backend | null {
-  const pool = applyAbsoluteRoutingFilter(buildFullBackendPool(), providerSlug);
+  const pool = applyAbsoluteRoutingFilter(buildBackendPool(), providerSlug);
   return pickBackendRendezvous(pool, fingerprint, exclude);
 }
 
 function pickBackendExcluding(exclude: Set<string>, providerSlug?: string): Backend | null {
-  const pool = applyAbsoluteRoutingFilter(buildFullBackendPool(), providerSlug);
-  const friends = pool.filter(
-    (b) => b.kind === "friend" && !exclude.has(b.url)
-  );
+  const pool = applyAbsoluteRoutingFilter(buildBackendPool(), providerSlug);
+  const friends = pool.filter((b) => !exclude.has(b.url));
   if (friends.length === 0) return null;
   // Prefer non-rate-limited backends within the filtered pool
   const available = friends.filter((b) => !isRateLimited(b.url));
@@ -2533,175 +2462,6 @@ function pickBackendExcluding(exclude: Set<string>, providerSlug?: string): Back
 // ---------------------------------------------------------------------------
 // Client factories
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Local node request handlers — forward to Replit AI Integrations
-// ---------------------------------------------------------------------------
-
-/**
- * Forward a /v1/chat/completions request to the local Replit AI Integrations
- * endpoint.  Handles both streaming (SSE) and non-streaming.
- *
- * Returns {ok:true} on success, {ok:false, status, message} on failure.
- */
-async function handleLocalChatCompletion(
-  req: Request,
-  res: Response,
-  body: Record<string, unknown>,
-  selectedModel: string,
-  wantsStream: boolean,
-  backendLabel: string,
-  startTime: number,
-  captureResponseFn?: (data: unknown) => void,
-): Promise<{ ok: boolean; status?: number; message?: string }> {
-  const route = getLocalRouteForModel(selectedModel);
-  if (!route) {
-    return { ok: false, status: 503, message: "Local node: no AI_INTEGRATIONS endpoint configured for this model." };
-  }
-
-  let endpoint: string;
-  let requestBody: string;
-
-  if (route.format === "anthropic") {
-    // AI_INTEGRATIONS_ANTHROPIC_BASE_URL already includes /v1, so append /messages directly.
-    endpoint = `${route.baseUrl}/messages`;
-    const oaiMessages = (body.messages as Array<{ role: string; content: unknown }>) ?? [];
-    const systemMsgs = oaiMessages.filter((m) => m.role === "system").map((m) => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n");
-    const nonSystemMsgs = oaiMessages.filter((m) => m.role !== "system").map((m) => ({
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content,
-    }));
-    const anBody: Record<string, unknown> = {
-      model: selectedModel,
-      messages: nonSystemMsgs,
-      max_tokens: (body.max_tokens as number) ?? GATEWAY_DEFAULTS.anthropicRequiredMaxTokens,
-      stream: wantsStream,
-    };
-    if (systemMsgs) anBody["system"] = systemMsgs;
-    if (body.temperature !== undefined) anBody["temperature"] = body.temperature;
-    if (body.top_p !== undefined) anBody["top_p"] = body.top_p;
-    requestBody = JSON.stringify(anBody);
-  } else {
-    // AI_INTEGRATIONS_*_BASE_URL already includes /v1; append /chat/completions directly.
-    endpoint = `${route.baseUrl}/chat/completions`;
-    requestBody = JSON.stringify({ ...body, model: selectedModel, stream: wantsStream });
-  }
-
-  let upstreamRes: any;
-  try {
-    upstreamRes = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${route.apiKey}`,
-        "User-Agent": "vcpproxy-local/1.0",
-        ...(route.format === "anthropic" ? { "anthropic-version": "2023-06-01" } : {}),
-      },
-      body: requestBody,
-      signal: AbortSignal.timeout(GATEWAY_TIMEOUTS.upstreamLongPollMs),
-    } as RequestInit);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    req.log?.error?.({ model: selectedModel, backend: backendLabel, err: msg }, "Local node fetch error");
-    return { ok: false, status: 502, message: `Local node request failed: ${msg}` };
-  }
-
-  if (!upstreamRes.ok) {
-    let errText = "";
-    try { errText = await upstreamRes.text(); } catch { /* ignore */ }
-    req.log?.warn?.({ model: selectedModel, backend: backendLabel, status: upstreamRes.status, body: errText.slice(0, 300) }, "Local node upstream error");
-    let parsedErr: unknown;
-    try { parsedErr = JSON.parse(errText); } catch { parsedErr = { error: { message: errText || "upstream error", type: "upstream_error" } }; }
-    return { ok: false, status: upstreamRes.status, message: JSON.stringify(parsedErr) };
-  }
-
-  if (wantsStream) {
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.setHeader("X-Backend", backendLabel);
-    if (!res.headersSent) res.status(200);
-    const reader = upstreamRes.body?.getReader();
-    if (!reader) {
-      res.end();
-      recordCallStat(backendLabel, Date.now() - startTime, 0, 0, undefined, selectedModel);
-      return { ok: true };
-    }
-    const decoder = new TextDecoder();
-    let done = false;
-    let firstChunkAt: number | undefined;
-    let streamPrompt = 0; let streamCompletion = 0;
-    const sseBuffer: string[] = [];
-    while (!done) {
-      const chunk = await reader.read();
-      done = chunk.done;
-      if (chunk.value) {
-        if (firstChunkAt === undefined) firstChunkAt = Date.now();
-        const text = decoder.decode(chunk.value, { stream: !done });
-        res.write(text);
-        sseBuffer.push(text);
-      }
-    }
-    res.end();
-    // Parse usage from final SSE chunks (OpenAI-compat format)
-    for (const raw of sseBuffer) {
-      for (const line of raw.split("\n")) {
-        if (!line.startsWith("data: ")) continue;
-        const payload = line.slice(6);
-        if (payload === "[DONE]") continue;
-        try {
-          const j = JSON.parse(payload) as { usage?: { prompt_tokens?: number; completion_tokens?: number } };
-          if (j.usage) {
-            streamPrompt += j.usage.prompt_tokens ?? 0;
-            streamCompletion += j.usage.completion_tokens ?? 0;
-          }
-        } catch { /* ignore */ }
-      }
-    }
-    const durationMs = Date.now() - startTime;
-    const ttftMs = firstChunkAt !== undefined ? firstChunkAt - startTime : undefined;
-    recordCallStat(backendLabel, durationMs, streamPrompt, streamCompletion, ttftMs, selectedModel);
-    recordCostStat(backendLabel, estimateCostUSD(selectedModel, streamPrompt, streamCompletion, 0, 0));
-    pushRequestLog({
-      method: req.method, path: req.path, model: selectedModel,
-      backend: backendLabel, status: 200, duration: durationMs, stream: true, level: "info",
-    });
-    return { ok: true };
-  } else {
-    let data: unknown;
-    try { data = await upstreamRes.json(); } catch {
-      return { ok: false, status: 502, message: "Local node: invalid JSON response from upstream." };
-    }
-    captureResponseFn?.(data);
-    const durationMs = Date.now() - startTime;
-    // Extract usage from non-streaming response
-    const usage = (data as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
-    recordCallStat(
-      backendLabel, durationMs,
-      usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0,
-      undefined, selectedModel,
-    );
-    recordCostStat(backendLabel, estimateCostUSD(selectedModel, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0, 0, 0));
-    res.setHeader("X-Backend", backendLabel);
-    res.json(data);
-    pushRequestLog({
-      method: req.method, path: req.path, model: selectedModel,
-      backend: backendLabel, status: 200, duration: durationMs, stream: false, level: "info",
-    });
-    return { ok: true };
-  }
-}
-
-/**
- * Wrap buildBackendPool() to prepend the local backend when enabled.
- * Local is prepended so rendezvous hashing can include it in the candidate set.
- */
-function buildFullBackendPool(): Backend[] {
-  const pool: Backend[] = [...buildBackendPool()];
-  const local = buildLocalBackend();
-  if (local) pool.unshift(local);
-  return pool;
-}
 
 
 // ---------------------------------------------------------------------------
@@ -3847,7 +3607,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   let backend = pickBackendForCache(cacheFingerprint, ccLockedSlug);
   if (!backend) {
     finishInflight?.();
-    res.status(503).json({ error: { message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends or enable local node (requires AI_INTEGRATIONS env vars).", type: "service_unavailable" } });
+    res.status(503).json({ error: { code: "no_backends_available", message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends.", type: "service_unavailable" } });
     return;
   }
 
@@ -3864,42 +3624,6 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
 
     try {
       triedFriendUrls.add(backend.url);
-
-      // Route to local node (Replit AI Integrations) if this is a local backend.
-      if (backend.kind === "local") {
-        // Defensive double-check: if the setting was toggled off mid-request, skip local immediately.
-        if (!getEnableLocalNode()) {
-          const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls, ccLockedSlug);
-          if (next && attempt < MAX_FRIEND_RETRIES) { backend = next; continue; }
-          finishInflight?.();
-          res.status(503).json({ error: { message: "Local node is disabled. Add friend proxy sub-nodes to serve requests.", type: "service_unavailable" } });
-          return;
-        }
-        const localResult = await handleLocalChatCompletion(
-          req, res, { messages: finalMessages, tools, tool_choice, max_tokens, ...extraParams, model: selectedModel },
-          selectedModel, shouldStream, backendLabel, startTime, captureResponseFn,
-        );
-        if (localResult.ok) {
-          if (responseCacheKey && capturedNonStreamResponse !== null) {
-            const json = capturedNonStreamResponse as any;
-            if (json.id && Array.isArray(json.choices) && json.choices.length > 0) {
-              cacheSet(responseCacheKey, capturedNonStreamResponse, selectedModel);
-            }
-          }
-          finishInflight?.();
-          return;
-        }
-        // Local failed — try friend backends
-        const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls, ccLockedSlug);
-        if (!next || attempt >= MAX_FRIEND_RETRIES) {
-          finishInflight?.();
-          const errPayload = (() => { try { return JSON.parse(localResult.message ?? "{}"); } catch { return { error: { message: localResult.message, type: "upstream_error" } }; } })();
-          res.status(localResult.status ?? 502).json(errPayload);
-          return;
-        }
-        backend = next;
-        continue;
-      }
 
       const friendModel = normalizeFriendModel(selectedModel);
       if (friendModel !== selectedModel) {
@@ -4038,7 +3762,7 @@ router.post("/v1/embeddings", requireApiKey, async (req: Request, res: Response)
   // We keep trying until we find a sub-node that can handle the model.
   const allBackends = buildBackendPool();
   if (allBackends.length === 0) {
-    res.status(503).json({ error: { message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends, or enable local node (requires AI_INTEGRATIONS env vars).", type: "service_unavailable" } });
+    res.status(503).json({ error: { code: "no_backends_available", message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends.", type: "service_unavailable" } });
     return;
   }
 
@@ -4138,7 +3862,7 @@ router.post("/v1/rerank", requireApiKey, async (req: Request, res: Response) => 
   const startTime = Date.now();
   const allBackends = buildBackendPool();
   if (allBackends.length === 0) {
-    res.status(503).json({ error: { message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends, or enable local node (requires AI_INTEGRATIONS env vars).", type: "service_unavailable" } });
+    res.status(503).json({ error: { code: "no_backends_available", message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends.", type: "service_unavailable" } });
     return;
   }
 
@@ -4356,59 +4080,13 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 
   let backend = pickBackendForCache(anthropicFP, messagesLockedSlug);
   if (!backend) {
-    res.status(503).json({ error: { type: "service_unavailable", message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends, or enable local node (requires AI_INTEGRATIONS env vars)." } });
+    res.status(503).json({ error: { code: "no_backends_available", type: "service_unavailable", message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends." } });
     return;
   }
 
   for (let attempt = 0; ; attempt++) {
     triedMsgUrls.add(backend.url);
     req.log.info({ model: selectedModel, stream: shouldStream, backend: backend.label, attempt, cacheHash: fnv1aHash(anthropicFP) }, "Anthropic /v1/messages attempt");
-
-    // Route to local node for Anthropic-native messages (forward directly to ANTHROPIC integration)
-    if (backend.kind === "local") {
-      // Defensive double-check: if the setting was toggled off mid-request, skip local immediately.
-      if (!getEnableLocalNode()) {
-        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
-        if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
-        res.status(503).json({ error: { type: "service_unavailable", message: "Local node is disabled. Add friend proxy sub-nodes to serve requests." } });
-        return;
-      }
-      const anUrl = (process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] ?? "").replace(/\/+$/, "");
-      const orUrl = (process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"] ?? "").replace(/\/+$/, "");
-      if (!anUrl && !orUrl) {
-        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
-        if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
-        res.status(503).json({ error: { type: "service_unavailable", message: "Local node: no ANTHROPIC or OPENROUTER AI_INTEGRATIONS endpoint configured." } });
-        return;
-      }
-      // Prefer Anthropic native; fall back to OpenRouter (convert to OpenAI-compat format)
-      if (anUrl) {
-        const localResult = await handleLocalChatCompletion(
-          req, res, body as Record<string, unknown>, selectedModel, shouldStream, "local", startTime,
-        );
-        if (localResult.ok) return;
-        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
-        if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
-        res.status(localResult.status ?? 502).json({ error: { message: localResult.message, type: "upstream_error" } });
-        return;
-      }
-      // Convert Anthropic body → OpenAI-compat for OpenRouter
-      const oaiMsgs: Array<Record<string, unknown>> = [];
-      const sysVal = body["system"];
-      if (typeof sysVal === "string" && sysVal) oaiMsgs.push({ role: "system", content: sysVal });
-      else if (Array.isArray(sysVal)) {
-        const sysText = (sysVal as Array<{ type?: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
-        if (sysText) oaiMsgs.push({ role: "system", content: sysText });
-      }
-      for (const m of (body["messages"] as Array<Record<string, unknown>>) ?? []) oaiMsgs.push(m);
-      const convertedBody = { model: selectedModel, messages: oaiMsgs, max_tokens: body["max_tokens"], stream: shouldStream, temperature: body["temperature"], top_p: body["top_p"] };
-      const localResult = await handleLocalChatCompletion(req, res, convertedBody as Record<string, unknown>, selectedModel, shouldStream, "local", startTime);
-      if (localResult.ok) return;
-      const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
-      if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
-      res.status(localResult.status ?? 502).json({ error: { message: localResult.message, type: "upstream_error" } });
-      return;
-    }
 
     const msgAbort = new AbortController();
     const onMsgClose = (): void => { if (!res.writableEnded && !msgAbort.signal.aborted) msgAbort.abort("client_disconnected"); };
@@ -4838,13 +4516,12 @@ router.get("/v1/stats", requireApiKey, async (_req: Request, res: Response) => {
       totalCostUSD: s.totalCostUSD,
       avgDurationMs: s.calls > 0 ? Math.round(s.totalDurationMs / s.calls) : 0,
       avgTtftMs: s.streamingCalls > 0 ? Math.round(s.totalTtftMs / s.streamingCalls) : null,
-      health: label === "local" ? "healthy" : getCachedHealth(cfg?.apiBaseUrl ?? "") === false ? "down" : "healthy",
-      publicBaseUrl: label === "local" ? null : cfg?.publicBaseUrl ?? null,
-      apiBaseUrl: label === "local" ? null : cfg?.apiBaseUrl ?? null,
-      source: cfg?.source ?? "local",
+      health: getCachedHealth(cfg?.apiBaseUrl ?? "") === false ? "down" : "healthy",
+      publicBaseUrl: cfg?.publicBaseUrl ?? null,
+      apiBaseUrl: cfg?.apiBaseUrl ?? null,
+      source: cfg?.source ?? "dynamic",
       dynamic: cfg?.source === "dynamic",
-      // For local node, enabled reflects the actual toggle state; for friend nodes use cfg.enabled
-      enabled: label === "local" ? getEnableLocalNode() : (cfg ? cfg.enabled : true),
+      enabled: cfg ? cfg.enabled : true,
       nodeId: cfg?.nodeId ?? null,
       version: cfg?.version ?? null,
       integrationsAllReady: cfg?.integrationsAllReady ?? null,
@@ -4852,20 +4529,12 @@ router.get("/v1/stats", requireApiKey, async (_req: Request, res: Response) => {
     };
   }
   const modelStats: Record<string, ModelStat> = Object.fromEntries(modelStatsMap.entries());
-  const localNodeEnabled = getEnableLocalNode();
-  const localNodeAvailable = localNodeEnabled && !!(
-    process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"] ||
-    process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] ||
-    process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] ||
-    process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]
-  );
   res.json({
     stats: result,
     modelStats,
     uptimeSeconds: Math.round(process.uptime()),
     routing: routingSettings,
     responseCache: await getCacheStats(),
-    localNode: { enabled: localNodeEnabled, available: localNodeAvailable },
   });
 });
 
@@ -5135,8 +4804,6 @@ router.post("/v1/internal/nodes/heartbeat", requireApiKey, (req: Request, res: R
 router.get("/v1/admin/routing", requireApiKey, (_req: Request, res: Response) => {
   res.json({
     fakeStream: routingSettings.fakeStream,
-    localEnabled: getEnableLocalNode(),
-    localFallback: false,
   });
 });
 
@@ -5144,7 +4811,7 @@ router.patch("/v1/admin/routing", requireApiKey, (req: Request, res: Response) =
   const body = req.body as Record<string, unknown>;
   if (typeof body.fakeStream === "boolean") routingSettings.fakeStream = body.fakeStream;
   saveRoutingSettings();
-  res.json({ fakeStream: routingSettings.fakeStream, localEnabled: getEnableLocalNode(), localFallback: false });
+  res.json({ fakeStream: routingSettings.fakeStream });
 });
 
 // ---------------------------------------------------------------------------

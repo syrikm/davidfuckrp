@@ -11,7 +11,7 @@ import { startHotUpdateChecker } from "./lib/hotUpdater";
 if (!process.env["PROXY_API_KEY"]) {
   throw new Error(
     "PROXY_API_KEY environment variable is required but was not provided. " +
-    "Set it as a secret in the Replit Secrets panel.",
+    "Set the PROXY_API_KEY environment variable before starting the server.",
   );
 }
 

@@ -13,35 +13,18 @@ const SETTINGS_FILE = resolve(process.cwd(), "server_settings.json");
 
 interface ServerSettings {
   sillyTavernMode: boolean;
-  /**
-   * Enable local node routing via Replit AI Integrations (AI_INTEGRATIONS_*
-   * env vars).  When true, local is added to the backend pool alongside any
-   * friend proxy sub-nodes; when false only friend sub-nodes are used.
-   * Default: true (if AI_INTEGRATIONS env vars are present, local is used).
-   */
-  enableLocalNode: boolean;
 }
 
 function loadSettings(): ServerSettings {
   try {
     if (existsSync(SETTINGS_FILE)) {
-      const raw = JSON.parse(readFileSync(SETTINGS_FILE, "utf8")) as Partial<ServerSettings & { localNodeStrictDisable?: boolean }>;
-      // Migrate legacy localNodeStrictDisable → enableLocalNode (inverted)
-      // Default OFF — local node is opt-in; only true if explicitly saved as true.
-      let enableLocal = false;
-      if (typeof raw.enableLocalNode === "boolean") {
-        enableLocal = raw.enableLocalNode;
-      } else if (typeof raw.localNodeStrictDisable === "boolean") {
-        // Legacy migration: strictDisable=false → user wanted local enabled → true
-        enableLocal = !raw.localNodeStrictDisable;
-      }
+      const raw = JSON.parse(readFileSync(SETTINGS_FILE, "utf8")) as Partial<ServerSettings>;
       return {
         sillyTavernMode: typeof raw.sillyTavernMode === "boolean" ? raw.sillyTavernMode : false,
-        enableLocalNode: enableLocal,
       };
     }
   } catch {}
-  return { sillyTavernMode: false, enableLocalNode: false };
+  return { sillyTavernMode: false };
 }
 
 function saveSettings(s: ServerSettings): void {
@@ -52,10 +35,6 @@ const settings: ServerSettings = loadSettings();
 
 export function getSillyTavernMode(): boolean {
   return settings.sillyTavernMode;
-}
-
-export function getEnableLocalNode(): boolean {
-  return settings.enableLocalNode;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,45 +95,6 @@ router.post("/settings/sillytavern", (req: Request, res: Response) => {
   settings.sillyTavernMode = enabled;
   saveSettings(settings);
   res.json({ enabled: settings.sillyTavernMode });
-});
-
-// ---------------------------------------------------------------------------
-// GET /settings/local-node — 读取本地节点启用状态
-// ---------------------------------------------------------------------------
-
-router.get("/settings/local-node", (req: Request, res: Response) => {
-  if (!checkApiKey(req, res)) return;
-  const openaiUrl = process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"];
-  const anthropicUrl = process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"];
-  const geminiUrl = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
-  const orUrl = process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"];
-  const hasIntegrations = !!(openaiUrl || anthropicUrl || geminiUrl || orUrl);
-  res.json({
-    enabled: settings.enableLocalNode,
-    available: hasIntegrations,
-    integrations: {
-      openai: !!openaiUrl,
-      anthropic: !!anthropicUrl,
-      gemini: !!geminiUrl,
-      openrouter: !!orUrl,
-    },
-  });
-});
-
-// ---------------------------------------------------------------------------
-// POST /settings/local-node — 切换本地节点启用
-// ---------------------------------------------------------------------------
-
-router.post("/settings/local-node", (req: Request, res: Response) => {
-  if (!checkApiKey(req, res)) return;
-  const { enabled } = req.body as { enabled?: boolean };
-  if (typeof enabled !== "boolean") {
-    res.status(400).json({ error: { message: "enabled 字段必须为 boolean", type: "invalid_request_error" } });
-    return;
-  }
-  settings.enableLocalNode = enabled;
-  saveSettings(settings);
-  res.json({ enabled: settings.enableLocalNode });
 });
 
 export default router;

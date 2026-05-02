@@ -83,7 +83,15 @@ function reasoningIsEnabled(reasoningField: unknown): boolean {
  *
  * Mutates `body` in-place and records what was removed in `removed`.
  */
-function sanitizeClaudeSamplingParams(
+/**
+ * Exported so `handleFriendProxy.buildBody` (routes/proxy.ts) can apply the
+ * same Claude sampling-param sanitization to bodies it constructs from
+ * scratch — those never pass through `buildOpenRouterRequest`, so without an
+ * external entry point opus-4-7 / mythos requests on the `/v1/*` hot path
+ * would still leak `temperature` / `top_p` / `top_k` and trigger upstream
+ * 400s. Single source of truth for the rule, called from two call sites.
+ */
+export function sanitizeClaudeSamplingParams(
   body: Record<string, unknown>,
 ): { applied: boolean; removed: string[]; reason?: string } {
   const model = typeof body.model === "string" ? body.model : "";

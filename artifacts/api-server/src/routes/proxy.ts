@@ -75,6 +75,7 @@ import {
   executeGatewayRequest,
   listAbsoluteProviderPrefixAliases,
   normalizeGatewayRequest,
+  sanitizeClaudeSamplingParams,
   summarizeIR,
 } from "../lib/gateway";
 import type { GatewayProviderRoute } from "../lib/gateway";
@@ -6153,7 +6154,24 @@ async function handleFriendProxy({
 
   const buildBody = (msgs: OAIMessage[]): Record<string, unknown> => {
     let finalMsgs = msgs;
-    const b: Record<string, unknown> = { ...extraParams, model: normalizedModel, stream };
+    // Deep-clone `extraParams` per buildBody call so the two invocations per
+    // request (probe at 6397, real fetch at 6481) cannot share nested object
+    // references (`reasoning`, `tools`, `cache_control`, vendor extras) and
+    // also so any mutation here cannot propagate back to the IR / req.body
+    // tree held by Express logger / inflight dedup snapshots. structuredClone
+    // is safe for JSON-only HTTP bodies; falls back to a shallow copy on the
+    // pathological case it cannot handle.
+    let safeExtraParams: Record<string, unknown>;
+    if (!extraParams) {
+      safeExtraParams = {};
+    } else {
+      try {
+        safeExtraParams = structuredClone(extraParams);
+      } catch {
+        safeExtraParams = { ...extraParams };
+      }
+    }
+    const b: Record<string, unknown> = { ...safeExtraParams, model: normalizedModel, stream };
     // Only provide an Anthropic-safe default when the caller omitted every explicit
     // output cap. Never override a user-supplied token limit from the incoming request.
     if (typeof maxTokens === "number") {
@@ -6384,6 +6402,23 @@ async function handleFriendProxy({
     b.messages = finalMsgs;
     // Snapshot message structure AFTER injection (roles + char counts, no content).
     msgSummaryStr = describeMsgs(finalMsgs as unknown[]);
+
+    // Final pass: strip Claude sampling params that the upstream rejects.
+    //   • opus-4-7+ / mythos: temperature, top_p, top_k, presence_penalty
+    //     are deprecated unconditionally (Replit ai-integrations-anthropic
+    //     skill: "Setting any of these to a non-default value will return
+    //     a 400 error").
+    //   • other Claude with reasoning enabled: temperature must be 1.0 and
+    //     top_p / top_k / presence_penalty are forbidden (Anthropic
+    //     extended-thinking docs).
+    // Shared single source of truth with `buildOpenRouterRequest`, exported
+    // from `lib/gateway/openrouter.ts`. Must run BEFORE `hashRequest(body)`
+    // at line 6482 so the cache key reflects the post-sanitization body —
+    // otherwise two callers sending different `temperature` values for the
+    // same opus-4-7 prompt would produce different cache keys despite
+    // identical upstream requests, wasting tokens on avoidable misses.
+    sanitizeClaudeSamplingParams(b);
+
     return b;
   };
 

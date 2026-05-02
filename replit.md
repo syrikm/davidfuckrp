@@ -62,6 +62,12 @@ The gateway employs a robust routing architecture with a focus on cost efficienc
 
 Rules: (1) for `claude-opus-4-7+` and `claude-mythos*`, delete `temperature`, `top_p`, `top_k`, `presence_penalty` outright; (2) for other Claude models with `reasoning.enabled === true || effort set || max_tokens set`, force `temperature=1` and delete `top_p`/`top_k`/`presence_penalty`. Records what was removed in `summary.claudeSanitization` for telemetry. The `reasoning.effort` value `"max"` is now passed through verbatim (previous attempt to map it to `"xhigh"`/`"high"` was wrong — OR has model-aware fuzzy mapping that handles it).
 
+**Race / Aliasing Hardening (2026-05, follow-up):** Coverage gap and reference-aliasing risks identified in a follow-up review of the sanitizer rollout, all addressed:
+- **Hot-path coverage**: `sanitizeClaudeSamplingParams` is now exported from `lib/gateway/openrouter.ts` and applied at the end of `handleFriendProxy.buildBody` (`routes/proxy.ts`) — the `/v1/chat/completions` and `/v1/messages` paths construct bodies from scratch and previously bypassed the sanitizer entirely.
+- **Cache-key canonicalization**: sanitizer runs **before** `hashRequest(body)` so identical opus-4-7 prompts with different (now-stripped) `temperature` values collapse to the same cache key — no avoidable cache misses.
+- **Deep-clone IR boundary**: `cloneUnknownFields` (`lib/gateway/normalize.ts`) was previously a shallow copy, leaving nested `req.body.<unknownKey>.<...>` references shared across the IR, the upstream body, and the originalBody/retry snapshot. Now uses `structuredClone` (with JSON fallback). Eliminates an entire class of "mutation here leaks back to Express logger / inflight dedup / retry" bugs at the root.
+- **`extraParams` isolation per buildBody call**: the closure is invoked twice per request (probe at `:6397`, real fetch at `:6481`) and both bodies used to share nested-object refs from the caller's `extraParams`. Now deep-cloned at the top of each `buildBody` invocation.
+
 **Technical Implementations:**
 - **Monorepo Structure:** Managed with `pnpm workspaces`.
 - **Backend:** Node.js 24 with Express 5.

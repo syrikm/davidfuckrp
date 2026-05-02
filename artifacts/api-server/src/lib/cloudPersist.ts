@@ -27,11 +27,21 @@ export async function readJson<T>(name: string): Promise<T | null> {
   }
 }
 
-/** Write a JSON config file. Logs but swallows errors to match legacy behavior. */
+/**
+ * Write a JSON config file. Logs **and rethrows** on failure so callers can
+ * surface persistence errors to the user (e.g. settings.ts returns 500).
+ *
+ * All existing callers either chain `.catch()` (fire-and-forget for
+ * background flushes in proxy.ts/backendPool) or wrap in try/catch
+ * (manualModelStore.ts). New callers that need the legacy "log and ignore"
+ * semantics should append `.catch(() => undefined)` themselves — making the
+ * intent explicit at the call site rather than swallowing globally.
+ */
 export async function writeJson<T>(name: string, data: T): Promise<void> {
   try {
     await getStorageAdapter().write(name, data);
   } catch (err) {
     console.error(`[cloudPersist] write failed for ${name}:`, err);
+    throw err;
   }
 }

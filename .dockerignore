@@ -18,8 +18,9 @@
 replit.nix
 replit.md
 
-# Other artifacts (image only ships api-server)
-artifacts/api-portal
+# Other artifacts not bundled into the runtime image.
+# api-portal IS bundled (Dockerfile builds it and copies dist/public →
+# /app/portal-dist), so it must stay in the build context.
 artifacts/mockup-sandbox
 
 # Anything generated locally — let the builder regenerate

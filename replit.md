@@ -54,6 +54,14 @@ The gateway employs a robust routing architecture with a focus on cost efficienc
 
 **Upgraded `PageLogs` (2026-05):** Server-side `RequestLog` fields `cacheReadTokens / cacheWriteTokens / cacheTier / msgSummary / priceUSD` previously dropped by the front-end are now surfaced. Each row is click-to-expand with full detail (request summary, error stack, cache tier, USD price). Top strip has 7 mini-KPI cards (Total / Errors / Avg / P95 / Tokens / Cache hit-rate / Total cost), 60-point latency sparkline (recharts), full-text search across path/model/backend/error/msgSummary, txt+json download, framer-motion expansion animation.
 
+**Claude Sampling Param Sanitization (2026-05, gateway/openrouter.ts):** Final-pass sanitizer on the OpenRouter bridge serialization step that strips/coerces sampling params the Claude family rejects. Cross-referenced against four sources before implementation:
+- Replit AI Integrations docs (the 4 distinct integrations: openai / anthropic / gemini / openrouter — each with its own env-var pair `AI_INTEGRATIONS_<P>_BASE_URL` + `_API_KEY`).
+- Official Anthropic extended-thinking docs (`temperature` must be 1.0; `top_p`/`top_k`/`presence_penalty` forbidden when thinking enabled).
+- Replit Anthropic skill model registry (`claude-opus-4-7` / `claude-mythos-preview` deprecate `temperature`/`top_p`/`top_k` unconditionally — returns 400 even without thinking).
+- OpenRouter reasoning docs (effort enum `minimal/low/medium/high/xhigh/none`; `:max` is a *model* suffix not an effort value; OR fuzzy-maps unknown effort tokens to nearest supported level).
+
+Rules: (1) for `claude-opus-4-7+` and `claude-mythos*`, delete `temperature`, `top_p`, `top_k`, `presence_penalty` outright; (2) for other Claude models with `reasoning.enabled === true || effort set || max_tokens set`, force `temperature=1` and delete `top_p`/`top_k`/`presence_penalty`. Records what was removed in `summary.claudeSanitization` for telemetry. The `reasoning.effort` value `"max"` is now passed through verbatim (previous attempt to map it to `"xhigh"`/`"high"` was wrong — OR has model-aware fuzzy mapping that handles it).
+
 **Technical Implementations:**
 - **Monorepo Structure:** Managed with `pnpm workspaces`.
 - **Backend:** Node.js 24 with Express 5.

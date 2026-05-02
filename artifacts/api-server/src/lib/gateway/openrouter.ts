@@ -19,14 +19,31 @@ import type {
 // or any of the cloud-Anthropic backends (Bedrock / Vertex / Anthropic
 // direct), so the sanitization runs unconditionally for the Claude family
 // at the OpenRouter-bridge serialization step.
-const CLAUDE_FAMILY_RE = /^(?:(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\/)?claude[-/]/i;
+// Backend prefix matcher — handles single (`anthropic/...`) and nested
+// (`openrouter/anthropic/...`) routing prefixes. Order matters: strip
+// `openrouter/` first so the inner provider prefix is exposed.
+const CLAUDE_BACKEND_PREFIX_RE = /^(?:openrouter\/)?(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\//i;
+const CLAUDE_FAMILY_RE = /^(?:openrouter\/)?(?:(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\/)?claude[-/]/i;
+// Opus 4.7-4.9 (current numbering) or Opus 5+, plus Mythos. The `(?:\D|$)`
+// boundary prevents matching past the version digit. If Anthropic ever
+// switches to two-digit minor versions (4-70+) this regex will need
+// loosening — flagged in MODEL_INVOCATION_RESEARCH.md.
 const CLAUDE_OPUS_47_PLUS_RE = /^claude-opus-4[-.](?:[7-9])(?:\D|$)|^claude-opus-(?:[5-9])|^claude-mythos/i;
+// Trailing alias suffixes that the gateway uses internally; keep stripping
+// while present so `claude-opus-4-7-thinking-max` collapses cleanly.
+const CLAUDE_TRAILING_ALIAS_RE = /[\-:](?:thinking-visible|thinking|max|xhigh|high|medium|low|minimal|none)$/i;
 
 function stripClaudeBackendPrefix(model: string): string {
-  return model
-    .replace(/^(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\//i, "")
-    .replace(/-(?:thinking-visible|thinking|max|xhigh|high|medium|low|minimal|none)$/gi, "")
-    .replace(/-(?:thinking-visible|thinking|max|xhigh|high|medium|low|minimal|none)$/gi, "");
+  let stripped = model.replace(CLAUDE_BACKEND_PREFIX_RE, "");
+  // Recurse once: `openrouter/anthropic/claude-...` already had `openrouter/`
+  // stripped above, but the inner `anthropic/` prefix must also go.
+  stripped = stripped.replace(CLAUDE_BACKEND_PREFIX_RE, "");
+  // Strip alias suffixes (covers both `-thinking` and `:thinking` flavors)
+  // until none remain — combos like `:thinking-max` need two passes.
+  while (CLAUDE_TRAILING_ALIAS_RE.test(stripped)) {
+    stripped = stripped.replace(CLAUDE_TRAILING_ALIAS_RE, "");
+  }
+  return stripped;
 }
 
 function isClaudeFamily(model: string | undefined): boolean {
@@ -39,10 +56,18 @@ function isClaudeOpus47Plus(model: string | undefined): boolean {
   return CLAUDE_OPUS_47_PLUS_RE.test(stripClaudeBackendPrefix(model.toLowerCase()));
 }
 
+/**
+ * Decide whether the request body's `reasoning` field signals an active
+ * thinking/reasoning request that needs sampling-param sanitization.
+ *
+ * IMPORTANT: a body that explicitly sets `enabled: false` AND also includes
+ * `effort` or `max_tokens` is still treated as a reasoning request — the
+ * upstream (OpenRouter / Anthropic) infers thinking from any signal field,
+ * so the sanitizer must not be tricked by a stale `enabled: false`.
+ */
 function reasoningIsEnabled(reasoningField: unknown): boolean {
   if (!reasoningField || typeof reasoningField !== "object") return false;
   const r = reasoningField as Record<string, unknown>;
-  if (r.enabled === false) return false;
   return (
     r.enabled === true ||
     typeof r.effort === "string" ||
@@ -243,22 +268,16 @@ function buildReasoning(ir: GatewayRequestIR): Record<string, unknown> | undefin
 
   const reasoning: Record<string, unknown> = {};
 
-  // OpenRouter's reasoning.effort enum: minimal | low | medium | high | xhigh | none
-  // Map our internal "max" alias (used by `-max` model suffix) to the right
-  // OR effort value based on model capability:
-  //   - claude-opus-4-7+ / claude-mythos     → "xhigh" (only these accept it)
-  //   - everything else                      → "high"  (the highest effort the older
-  //                                                     models accept)
-  // Sending the literal "max" through to OR would trigger a 4xx since it's not
-  // in the documented enum.
-  if (ir.reasoning.effort) {
-    const effortLower = ir.reasoning.effort.toLowerCase();
-    if (effortLower === "max") {
-      reasoning.effort = isClaudeOpus47Plus(ir.model) ? "xhigh" : "high";
-    } else {
-      reasoning.effort = ir.reasoning.effort;
-    }
-  }
+  // Pass `effort` through verbatim — OpenRouter normalizes unknown effort
+  // values to the nearest supported level per its docs:
+  //   "If a model doesn't support a specific effort level (for example, if a
+  //    model only supports `low` and `high`), OpenRouter will map your
+  //    requested effort to the nearest supported level."
+  // The documented enum is { minimal | low | medium | high | xhigh | none }
+  // but OR's fuzzy-mapping layer means non-enum tokens (e.g. "max") are
+  // safe to forward — and several upstreams accept model-specific synonyms
+  // we don't want to flatten here.
+  if (ir.reasoning.effort) reasoning.effort = ir.reasoning.effort;
   if (typeof ir.reasoning.maxTokens === "number") reasoning.max_tokens = ir.reasoning.maxTokens;
   if (typeof ir.reasoning.exclude === "boolean") reasoning.exclude = ir.reasoning.exclude;
   if (typeof ir.reasoning.enabled === "boolean") reasoning.enabled = ir.reasoning.enabled;

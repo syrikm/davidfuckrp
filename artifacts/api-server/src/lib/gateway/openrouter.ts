@@ -7,6 +7,94 @@ import type {
   OpenRouterRequestBuildResult,
 } from "./types";
 
+// ─── Claude provider sanitization helpers ──────────────────────────────────
+// Per Anthropic docs (https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking)
+//   • When extended thinking is enabled, `temperature` MUST be 1.0 and
+//     `top_p`/`top_k`/`presence_penalty` are forbidden (returns 400).
+// Per Replit AI Integrations Anthropic skill (claude-opus-4-7 + Mythos)
+//   • `temperature`, `top_p`, `top_k` are deprecated on opus-4-7 and Mythos
+//     even WITHOUT thinking. Setting any to a non-default value returns 400.
+//
+// Both rules apply equally whether the request is routed through OpenRouter
+// or any of the cloud-Anthropic backends (Bedrock / Vertex / Anthropic
+// direct), so the sanitization runs unconditionally for the Claude family
+// at the OpenRouter-bridge serialization step.
+const CLAUDE_FAMILY_RE = /^(?:(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\/)?claude[-/]/i;
+const CLAUDE_OPUS_47_PLUS_RE = /^claude-opus-4[-.](?:[7-9])(?:\D|$)|^claude-opus-(?:[5-9])|^claude-mythos/i;
+
+function stripClaudeBackendPrefix(model: string): string {
+  return model
+    .replace(/^(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\//i, "")
+    .replace(/-(?:thinking-visible|thinking|max|xhigh|high|medium|low|minimal|none)$/gi, "")
+    .replace(/-(?:thinking-visible|thinking|max|xhigh|high|medium|low|minimal|none)$/gi, "");
+}
+
+function isClaudeFamily(model: string | undefined): boolean {
+  if (!model) return false;
+  return CLAUDE_FAMILY_RE.test(model);
+}
+
+function isClaudeOpus47Plus(model: string | undefined): boolean {
+  if (!model) return false;
+  return CLAUDE_OPUS_47_PLUS_RE.test(stripClaudeBackendPrefix(model.toLowerCase()));
+}
+
+function reasoningIsEnabled(reasoningField: unknown): boolean {
+  if (!reasoningField || typeof reasoningField !== "object") return false;
+  const r = reasoningField as Record<string, unknown>;
+  if (r.enabled === false) return false;
+  return (
+    r.enabled === true ||
+    typeof r.effort === "string" ||
+    typeof r.max_tokens === "number"
+  );
+}
+
+/**
+ * Strip / coerce sampling params that the Claude family rejects.
+ *
+ *   1. opus-4-7+ / Mythos:   delete temperature, top_p, top_k unconditionally.
+ *   2. Other Claude w/ reasoning: force temperature=1, delete top_p, top_k.
+ *
+ * Mutates `body` in-place and records what was removed in `removed`.
+ */
+function sanitizeClaudeSamplingParams(
+  body: Record<string, unknown>,
+): { applied: boolean; removed: string[]; reason?: string } {
+  const model = typeof body.model === "string" ? body.model : "";
+  if (!isClaudeFamily(model)) return { applied: false, removed: [] };
+
+  const removed: string[] = [];
+
+  if (isClaudeOpus47Plus(model)) {
+    for (const key of ["temperature", "top_p", "top_k", "presence_penalty"] as const) {
+      if (body[key] !== undefined) {
+        delete body[key];
+        removed.push(key);
+      }
+    }
+    return { applied: true, removed, reason: "claude-opus-4-7+/mythos: sampling params deprecated" };
+  }
+
+  if (reasoningIsEnabled(body.reasoning)) {
+    if (body.temperature !== undefined && body.temperature !== 1) {
+      body.temperature = 1;
+      removed.push("temperature→1");
+    }
+    for (const key of ["top_p", "top_k", "presence_penalty"] as const) {
+      if (body[key] !== undefined) {
+        delete body[key];
+        removed.push(key);
+      }
+    }
+    if (removed.length > 0) {
+      return { applied: true, removed, reason: "claude+thinking: incompatible sampling params stripped" };
+    }
+  }
+
+  return { applied: false, removed: [] };
+}
+
 function partToOpenAICompatible(part: GatewayPart): Record<string, unknown> {
   if (part.type === "text" || part.type === "input_text") {
     return { type: "text", text: part.text };
@@ -154,7 +242,23 @@ function buildReasoning(ir: GatewayRequestIR): Record<string, unknown> | undefin
   if (!ir.reasoning) return undefined;
 
   const reasoning: Record<string, unknown> = {};
-  if (ir.reasoning.effort) reasoning.effort = ir.reasoning.effort;
+
+  // OpenRouter's reasoning.effort enum: minimal | low | medium | high | xhigh | none
+  // Map our internal "max" alias (used by `-max` model suffix) to the right
+  // OR effort value based on model capability:
+  //   - claude-opus-4-7+ / claude-mythos     → "xhigh" (only these accept it)
+  //   - everything else                      → "high"  (the highest effort the older
+  //                                                     models accept)
+  // Sending the literal "max" through to OR would trigger a 4xx since it's not
+  // in the documented enum.
+  if (ir.reasoning.effort) {
+    const effortLower = ir.reasoning.effort.toLowerCase();
+    if (effortLower === "max") {
+      reasoning.effort = isClaudeOpus47Plus(ir.model) ? "xhigh" : "high";
+    } else {
+      reasoning.effort = ir.reasoning.effort;
+    }
+  }
   if (typeof ir.reasoning.maxTokens === "number") reasoning.max_tokens = ir.reasoning.maxTokens;
   if (typeof ir.reasoning.exclude === "boolean") reasoning.exclude = ir.reasoning.exclude;
   if (typeof ir.reasoning.enabled === "boolean") reasoning.enabled = ir.reasoning.enabled;
@@ -243,6 +347,12 @@ export function buildOpenRouterRequest(ir: GatewayRequestIR): OpenRouterRequestB
     preservedKeys.push(key);
   }
 
+  // Final pass: strip / coerce sampling params that the Claude family rejects.
+  // This MUST run after `unknownFields` are spread (in case top_k / top_p
+  // sneaked in via that route) and is the last line of defence before the
+  // payload reaches the upstream provider.
+  const sanitization = sanitizeClaudeSamplingParams(body);
+
   return {
     body,
     summary: {
@@ -260,6 +370,9 @@ export function buildOpenRouterRequest(ir: GatewayRequestIR): OpenRouterRequestB
       providerRoute: ir.modelResolution?.providerRoute,
       cache: ir.cache,
       preservedKeys,
+      claudeSanitization: sanitization.applied
+        ? { removed: sanitization.removed, reason: sanitization.reason }
+        : undefined,
     },
   };
 }

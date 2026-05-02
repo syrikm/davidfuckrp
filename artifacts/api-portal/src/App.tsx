@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import SetupWizard from "./components/SetupWizard";
 import PageLogs from "./components/PageLogs";
 import PageDocs from "./components/PageDocs";
+import PagePlayground from "./components/PagePlayground";
 
 // ---------------------------------------------------------------------------
 // Model registry
@@ -495,7 +496,7 @@ function normalizeBackendUrl(raw: string): string {
 // Page components
 // ---------------------------------------------------------------------------
 
-type Tab = "dashboard" | "cluster" | "models" | "tutorial" | "settings" | "system";
+type Tab = "dashboard" | "cluster" | "models" | "playground" | "tutorial" | "settings" | "system";
 
 function PageDashboard({
   displayUrl,
@@ -2000,6 +2001,7 @@ export default function App() {
     { id: "dashboard", label: "Dashboard", icon: "&#127968;" },
     { id: "cluster", label: "Cluster", icon: "&#128200;" },
     { id: "models", label: "Models", icon: "&#129302;" },
+    { id: "playground", label: "Playground", icon: "&#128172;" },
     { id: "tutorial", label: "Tutorial", icon: "&#128214;" },
     { id: "settings", label: "Settings", icon: "&#9881;" },
     { id: "system", label: "System", icon: "&#128736;" },
@@ -2156,6 +2158,8 @@ export default function App() {
             onToggleModel={toggleModelById}
           />
         )}
+
+        {tab === "playground" && <PagePlayground baseUrl={baseUrl} apiKey={apiKey} />}
 
         {tab === "tutorial" && (
           <PageTutorial

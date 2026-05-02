@@ -192,6 +192,7 @@ mother 现在是平台无关的纯 Node ≥ 20 服务，可在任何主机上 `p
 | B | `lib/storage/` adapter 层（local-fs / S3 / R2 / GCS / Replit），`cloudPersist.ts` 瘦身为薄包装；`unifiedModelManager` 全量走 adapter；drain-loop 修复 | ✅ |
 | C | 清理代码中残留 Replit 字面量：`owned_by` 默认改 `gatewayConfig.ownedBy`；升级 User-Agent / GitHub repo 改 env；用户文案 `"upstream Replit instance"` → `"upstream gateway instance"`；`source: "replit"` → `"bundle"`；多处 `"Replit's 300s/600s"` 注释改平台中立措辞 | ✅ |
 | D | `routes/proxy.ts` 中 5 个 Replit-tuned 硬编码超时（`legBWallMs` / `subNodeStreamWallMs` / `keepaliveJobMs` / `keepaliveAnthropicMs` / `keepaliveClientMs`）改为 env 可配置（`GATEWAY_*` 系列），默认值不变 | ✅ |
+| E | 上游 `sayrui/vcpfuckcachefork` review 对齐：`responseCache.ts` 删除死代码 `ShardMutex` 类 + `mutex` 字段 + `statsMutex` 全局（净 -30 行）。理由注释引用上游 `@3ec0e18`：Node.js 单线程下同步 Map 操作无需 mutex。其余上游提交（`@651ec6b` model-name normalize 等）已通过本地 `unifiedCacheKey.hashRequest()` 内置 `normaliseORModelId` 隐式覆盖；子代理特有改动（`PROXY_API_KEY` 默认、OR 直连）不适用 mother | ✅ |
 
 **单一配置真相源：** `artifacts/api-server/src/lib/gatewayConfig.ts`。所有品牌字符串、平台超时都集中读取。Stage C/D 是纯 additive 改动 —— 既有 Replit 部署不受任何影响（默认值与原硬编码值 1:1）。
 

@@ -6419,6 +6419,15 @@ async function handleFriendProxy({
     // identical upstream requests, wasting tokens on avoidable misses.
     sanitizeClaudeSamplingParams(b);
 
+    // SMOKING-GUN debug: prove what mother actually sends to the friend sub-node.
+    // Logs the outbound model + provider block + the route we detected, so we
+    // can tell whether (a) the lock is missing here, or (b) the friend strips it.
+    req.log.info({
+      outboundModel: b["model"],
+      outboundProvider: b["provider"],
+      detectedRoute: detectAbsoluteProviderRoute(model),
+    }, "[OUTBOUND_DEBUG] friend-proxy request body");
+
     return b;
   };
 

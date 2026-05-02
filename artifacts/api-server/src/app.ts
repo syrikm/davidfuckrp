@@ -79,6 +79,29 @@ app.use(
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Friendly root response — this is a backend-only API gateway, no UI on `/`.
+// Without this people hit the deployed URL and get a bare 404, which looks broken.
+// Returns a JSON usage hint with the live endpoint paths.
+app.get("/", (_req: Request, res: Response) => {
+  res.json({
+    name: "davidfuckrp",
+    description: "AI proxy gateway (mother). Backend-only — no UI on this URL.",
+    version: hotUpdateState.currentVersion !== "unknown"
+      ? hotUpdateState.currentVersion
+      : PROXY_VERSION_STATIC,
+    endpoints: {
+      health:        "/api/healthz",
+      setup_status:  "/api/setup-status",
+      list_models:   "/v1/models           (Authorization: Bearer <PROXY_API_KEY>)",
+      chat:          "POST /v1/chat/completions",
+      messages:      "POST /v1/messages",
+      admin_backends:"/api/v1/admin/backends",
+      admin_models:  "/api/v1/admin/models",
+    },
+    docs: "https://github.com/syrikm/davidfuckrp",
+  });
+});
+
 app.use("/api", router);
 app.use(proxyRouter);
 app.use("/api", proxyRouter);

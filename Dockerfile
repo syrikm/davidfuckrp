@@ -24,15 +24,26 @@ COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 # pnpm needs every workspace package.json present to resolve the graph.
 # Globbing all of them keeps the cache layer stable while the source changes.
 COPY artifacts/api-server/package.json artifacts/api-server/
+COPY artifacts/api-portal/package.json artifacts/api-portal/
 COPY lib lib
 COPY scripts scripts
 
-# Install only what api-server transitively needs.
+# Install everything api-server AND api-portal transitively need in one go.
 # --frozen-lockfile: reproducible builds (matches the committed lockfile)
-# Trailing "..." after the filter pulls in workspace dependencies of api-server
-RUN pnpm install --frozen-lockfile --filter "@workspace/api-server..."
+# Trailing "..." after each filter pulls in their workspace dependencies.
+RUN pnpm install --frozen-lockfile \
+      --filter "@workspace/api-server..." \
+      --filter "@workspace/api-portal..."
 
-# Now copy source and build
+# Build the portal SPA first. vite.config.ts insists on PORT/BASE_PATH being
+# present even at build time (it throws otherwise), so we set them inline.
+# BASE_PATH=/portal/ → Vite emits asset URLs like /portal/assets/index-abc.js
+# which exactly matches where api-server mounts express.static at runtime.
+COPY artifacts/api-portal artifacts/api-portal
+RUN PORT=8080 BASE_PATH=/portal/ NODE_ENV=production \
+    pnpm --filter @workspace/api-portal run build
+
+# Now copy api-server source and build it
 COPY artifacts/api-server artifacts/api-server
 RUN pnpm --filter @workspace/api-server run build
 
@@ -55,6 +66,10 @@ COPY --from=builder /build/artifacts/api-server/package.json ./package.json
 # `${cwd}/lib/models/registry.json` (cwd = /app). Bundling it as a static
 # asset would double the dist size, so just copy the file instead.
 COPY --from=builder /build/lib/models ./lib/models
+# Portal SPA build output — app.ts looks for `${cwd}/portal-dist/index.html`
+# and serves it on /portal/* with SPA fallback when present. Vite's outDir
+# is artifacts/api-portal/dist/public (see vite.config.ts).
+COPY --from=builder /build/artifacts/api-portal/dist/public ./portal-dist
 
 # Persistent data lives here. Mount a volume to /app/data when running with
 # STORAGE_BACKEND=local; otherwise set STORAGE_BACKEND=s3 + STORAGE_S3_* env vars.

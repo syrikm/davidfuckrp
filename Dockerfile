@@ -38,7 +38,7 @@ RUN pnpm --filter @workspace/api-server run build
 
 # Produce a self-contained directory at /app with only production deps
 # resolved (including the few esbuild externals that dist/index.mjs needs).
-RUN pnpm --filter @workspace/api-server deploy --prod /app
+RUN pnpm --filter @workspace/api-server deploy --prod --legacy /app
 
 # ----------------------------------------------------------------------------
 FROM node:24-alpine AS runtime

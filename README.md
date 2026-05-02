@@ -88,7 +88,7 @@ Render Dashboard → 你的 service → **Environment** 标签 → **Add Environ
    ```
    [storage] using adapter: S3StorageAdapter (selected via STORAGE_BACKEND env)
    ```
-2. 浏览器打开 `https://<your-app>.onrender.com/api/health` → 200
+2. 浏览器打开 `https://<your-app>.onrender.com/api/healthz` → 200
 3. 在管理后台 portal 添加一个 backend / 模型，然后回 Cloudflare R2 → 你的 bucket → 应该能看到 `models/`、`backends/`、`usage/` 这些目录被创建
 
 如果日志里报 `Access Denied` / `403` —— 99% 是 token 没勾对 bucket 权限，回第 2 步重做。
@@ -121,7 +121,7 @@ pnpm install
 pnpm --filter @workspace/api-server run dev
 ```
 
-访问 `http://localhost:8080/api/health` 应返回 200。
+访问 `http://localhost:8080/api/healthz` 应返回 200。
 
 或本地 Docker：
 

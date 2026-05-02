@@ -122,7 +122,7 @@ docker run -p 8080:8080 \
   davidfuckrp
 ```
 
-`curl http://localhost:8080/api/health` → 200 means it's up.
+`curl http://localhost:8080/api/healthz` → 200 means it's up.
 
 ---
 
@@ -144,7 +144,7 @@ For a step-by-step Cloudflare R2 walkthrough see the **Cloudflare R2 配置教�
 
 ## Health check
 
-`GET /api/health` returns 200 with a JSON summary of backend / model counts. The Dockerfile already wires this up as a `HEALTHCHECK` (30 s interval, 20 s start grace).
+`GET /api/healthz` returns 200 with `{"status":"ok"}`. The Dockerfile already wires this up as a `HEALTHCHECK` (30 s interval, 20 s start grace) and `render.yaml` uses it for Render's external healthcheck too.
 
 ## Bundle / image size
 

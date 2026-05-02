@@ -1,0 +1,33 @@
+[storage] using adapter: local-fs:/app/data (selected via STORAGE_BACKEND env)
+[init] failed to load builtin model registry: Builtin model registry not found. Phase-1 skeleton expects lib/models/registry.json to be present.
+[init] loaded 0 dynamic backend(s), label counter=0
+[init] model index built: 64 models across all providers
+[init] routing settings: {"fakeStream":true}
+{"level":30,"time":1777753282276,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","port":8080,"msg":"Server listening"}
+{"level":30,"time":1777753282277,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","intervalMs":1800000,"autoUpdate":false,"backoff":true,"idleTimeoutMs":900000,"msg":"[hot-update] Starting optimized hot update checker"}
+{"level":30,"time":1777753283366,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":1,"method":"HEAD","url":"/"},"res":{"statusCode":404},"responseTime":173,"msg":"request completed"}
+[openrouter] could not fetch model list: no friend proxy responded
+{"level":40,"time":1777753285394,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","err":{"type":"Error","message":"GitHub API returned 403","stack":"Error: GitHub API returned 403\n    at fetchLatestRelease (/app/src/lib/hotUpdater.ts:315:13)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async checkForUpdate (/app/src/lib/hotUpdater.ts:685:21)\n    at async runPeriodicCheck (/app/src/lib/hotUpdater.ts:834:18)"},"msg":"[hot-update] Failed to fetch latest release"}
+{"level":30,"time":1777753287082,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":2,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":97,"msg":"request completed"}
+[or-pricing] fetched 338 model prices from openrouter.ai
+[or-pricing] fallback: populated 371 OR models directly from openrouter.ai (no friend proxy reported)
+{"level":30,"time":1777753295925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":3,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753305925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":4,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753315925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":5,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":2,"msg":"request completed"}
+{"level":30,"time":1777753325925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":6,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753335925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":7,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753345925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":8,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753355925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":9,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753365925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":10,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753375924,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":11,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":0,"msg":"request completed"}
+{"level":30,"time":1777753385924,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":12,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":0,"msg":"request completed"}
+{"level":30,"time":1777753395925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":13,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753405925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":14,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753415928,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":15,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":3,"msg":"request completed"}
+{"level":30,"time":1777753425925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":16,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753435924,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":17,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":0,"msg":"request completed"}
+{"level":30,"time":1777753445924,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":18,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":0,"msg":"request completed"}
+{"level":30,"time":1777753455924,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":19,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":0,"msg":"request completed"}
+{"level":30,"time":1777753465925,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":20,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":2,"msg":"request completed"}
+{"level":30,"time":1777753475924,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":21,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}
+{"level":30,"time":1777753485924,"pid":7,"hostname":"srv-d7r5llf7f7vs73coksr0-hibernate-84fb77c7c6-5wdwj","req":{"id":22,"method":"GET","url":"/api/health"},"res":{"statusCode":404},"responseTime":1,"msg":"request completed"}

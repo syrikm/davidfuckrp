@@ -54,6 +54,34 @@
 `Backend` 类型定义为 `{ kind: "friend"; ... }` 单一形式，编译期即杜绝本地调用路径。
 已删除函数：`makeLocalOpenAI / makeLocalAnthropic / makeLocalGemini / makeLocalOpenRouter / handleOpenAI / handleGemini / handleClaude`
 
+## 绝对路由契约（V1.1.9）
+
+当模型 ID 含已注册的 provider prefix 时，gateway **强制**下发：
+- `provider.only = [<prefix-provider>]`
+- `provider.allow_fallbacks = false`
+
+这两个字段**不可被 client 端的 `provider.allow_fallbacks: true` 或更宽松的 `only` 覆盖** —— prefix 永远赢。
+
+支持的 lock prefix（节选）：`anthropic/`、`openai/`、`azure/`、`vertex/`、`google-ai-studio/`、`bedrock/`、`groq/`、`x-ai/`、`cerebras/`、`fireworks/`、`together/`、`deepinfra/`、`deepseek/`、`mistral/`、`cohere/`、`perplexity/`、`moonshot/`、`sambanova/`、`nvidia/` 等共 28 个 OpenRouter base slug（完整列表见 `provider.ts::PROVIDER_PREFIX_SPECS`）。
+
+特殊 prefix：
+- `openrouter/<inner-prefix>/<model>` —— 透传，递归解析 `<inner-prefix>` 的锁定语义
+- `meta-llama/`、`mistralai/`、`qwen/`、`amazon/` —— 仅作为型号命名空间，不锁 provider（同一型号可由多家 provider 服务）
+
+## 供应商文档（离线权威参考）
+
+完整官方文档已抓取到 `docs/vendors/`，路由实现以这些文档为唯一权威来源：
+
+| 供应商 | 关键文件 |
+|--------|---------|
+| OpenRouter | `provider-routing.md`（**绝对路由契约的源头**）、`api-reference-overview.md`、`parameters.md`、`providers-page.md`（69 家 provider 列表） |
+| OpenAI | `chat-completions.md`、`responses.md`、`models.md`、`reasoning.md` |
+| Anthropic | `messages.md`、`prompt-caching.md`、`vertex.md`、`bedrock.md`、`extended-thinking.md` |
+| Gemini | `generate-content.md`、`openai-compat.md` |
+| Replit AI Integrations | `ai-integrations*.md` + 4 份 SKILL.md |
+
+审计报告与修复清单：`docs/vendors/ROUTING_AUDIT.md`
+
 ## 认证
 
 所有 `/v1/*` 和 `/settings/*` 路由均受 `PROXY_API_KEY` 保护，支持：

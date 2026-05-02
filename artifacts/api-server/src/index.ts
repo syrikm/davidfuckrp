@@ -15,11 +15,10 @@ if (!process.env["PROXY_API_KEY"]) {
   );
 }
 
-const rawPort = process.env["PORT"];
-
-if (!rawPort) {
-  throw new Error("PORT environment variable is required but was not provided.");
-}
+// PORT defaults to 8080 in container deployments where the orchestrator
+// (ClawCloud Run / Render / Fly / Cloud Run / Docker) doesn't always set
+// it explicitly. On Replit the workflow injects PORT and overrides this.
+const rawPort = process.env["PORT"] ?? "8080";
 
 const port = Number(rawPort);
 

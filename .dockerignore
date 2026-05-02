@@ -1,0 +1,50 @@
+# Anything that doesn't belong in the build context.
+# Keeps `docker build` fast and the image small.
+
+# VCS / editor
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+
+# Replit-specific (not needed outside Replit)
+.replit
+.replitignore
+.local
+.cache
+.config
+.upm
+replit.nix
+replit.md
+
+# Other artifacts (image only ships api-server)
+artifacts/api-portal
+artifacts/mockup-sandbox
+
+# Anything generated locally — let the builder regenerate
+**/node_modules
+**/dist
+**/build
+**/.next
+**/.turbo
+**/.cache
+**/coverage
+
+# Persistent data — never bake into image
+artifacts/api-server/data
+artifacts/api-server/data_dev
+**/*.log
+/tmp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Misc
+*.swp
+*.swo
+*.tmp
+.env
+.env.*
+!.env.example

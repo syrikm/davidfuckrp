@@ -1,0 +1,110 @@
+// Cloudflare Worker 脚本
+
+// 需要保活的域名列表
+const DOMAINS = [
+  '你需要保活的域名',
+];
+
+export default {
+  // 定时触发器，每天执行一次
+  async scheduled(event, env, ctx) {
+    console.log(`[${new Date().toISOString()}] 开始执行保活任务`);
+    
+    const results = await Promise.allSettled(
+      DOMAINS.map(async (domain) => {
+        try {
+          const response = await fetch(domain, {
+            method: 'GET',
+            headers: {
+              'User-Agent': 'Cloudflare-Worker-Bot',
+              'Cache-Control': 'no-cache'
+            },
+            cf: {
+              cacheTtl: 0
+            }
+          });
+
+          const status = response.ok ? 'success' : 'failed';
+          console.log(`[${new Date().toISOString()}] ${domain}: ${status} (${response.status})`);
+          
+          return {
+            domain,
+            status,
+            statusCode: response.status,
+            timestamp: new Date().toISOString()
+          };
+        } catch (error) {
+          console.error(`[${new Date().toISOString()}] ${domain}: error - ${error.message}`);
+          return {
+            domain,
+            status: 'error',
+            error: error.message,
+            timestamp: new Date().toISOString()
+          };
+        }
+      })
+    );
+
+    console.log(`[${new Date().toISOString()}] 保活任务完成`);
+    return results;
+  },
+
+  // HTTP请求处理，用于手动触发和查看状态
+  async fetch(request, env, ctx) {
+    try {
+      const results = await Promise.allSettled(
+        DOMAINS.map(async (domain) => {
+          try {
+            const response = await fetch(domain, {
+              method: 'GET',
+              headers: {
+                'User-Agent': 'Cloudflare-Worker-Bot',
+                'Cache-Control': 'no-cache'
+              },
+              cf: {
+                cacheTtl: 0
+              }
+            });
+
+            return {
+              domain,
+              status: response.ok ? 'success' : 'failed',
+              statusCode: response.status,
+              timestamp: new Date().toISOString()
+            };
+          } catch (error) {
+            return {
+              domain,
+              status: 'error',
+              error: error.message,
+              timestamp: new Date().toISOString()
+            };
+          }
+        })
+      );
+
+      return new Response(JSON.stringify({
+        status: 'completed',
+        results: results.map(r => r.value),
+        timestamp: new Date().toISOString()
+      }), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({
+        status: 'error',
+        message: error.message,
+        timestamp: new Date().toISOString()
+      }), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+  }
+};

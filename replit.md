@@ -190,6 +190,10 @@ STORAGE_S3_SECRET_ACCESS_KEY=<r2-secret-key>
 
 **Stage B 完成（V1.1.9）：** 新增 `lib/storage/{adapter,local,s3,gcs,replit,index}.ts` 六文件 adapter 层，`cloudPersist.ts` 改为 30 行薄包装；mother 默认（无 env）即可在 vanilla Node 容器跑，写入 `./data/`。R2 通过 S3 adapter 完整支持。
 
+**启动 hydration 窗口注意事项：** `routes/settings.ts`（以及 `backendPool` / `manualModelStore`）在模块加载时启动异步 hydrate 从 storage 读回持久化状态。在 hydrate 完成前的极短窗口（毫秒级）内，相关 GET 端点会返回类型默认值（如 `sillyTavernMode: false`、空 backend 列表）。生产场景下不影响正确性 —— 用户首个请求几乎一定在 hydrate 完成之后。运维若需严格的"启动即可读"保证，可在 process supervisor 层加一个 `/api/healthz` 探活延迟。
+
+**回归测试脚本：** `scripts/test-storage-factory.sh` 一键跑 8 项 factory 选择断言（local 默认、replit 自动检测、invalid 拒绝、r2 缺 env 拒绝、r2+全 env 构造 s3 adapter 指向 R2、replit prod 前缀、本地 round-trip 等），无需任何外部凭证。
+
 ## Workspace
 
 ## Stack

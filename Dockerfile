@@ -26,6 +26,10 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # Copy lockfile + workspace manifest first for better Docker layer caching
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+# Root tsconfigs — api-portal/tsconfig.json `extends "../../tsconfig.base.json"`,
+# and Vite's esbuild transform follows that chain when bundling. Without these
+# present the build dies with `parseExtends → loadTsconfigJsonForFile`.
+COPY tsconfig.json tsconfig.base.json ./
 # pnpm needs every workspace package.json present to resolve the graph.
 # Globbing all of them keeps the cache layer stable while the source changes.
 COPY artifacts/api-server/package.json artifacts/api-server/

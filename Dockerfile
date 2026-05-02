@@ -51,9 +51,13 @@ WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /build/artifacts/api-server/dist ./dist
 COPY --from=builder /build/artifacts/api-server/package.json ./package.json
+# Builtin model registry — modelRegistry.ts looks for it at
+# `${cwd}/lib/models/registry.json` (cwd = /app). Bundling it as a static
+# asset would double the dist size, so just copy the file instead.
+COPY --from=builder /build/lib/models ./lib/models
 
 # Persistent data lives here. Mount a volume to /app/data when running with
-# STORAGE_BACKEND=local; otherwise set STORAGE_BACKEND=s3 + S3_* env vars.
+# STORAGE_BACKEND=local; otherwise set STORAGE_BACKEND=s3 + STORAGE_S3_* env vars.
 RUN mkdir -p /app/data && chown -R node:node /app
 
 ENV NODE_ENV=production \
@@ -63,10 +67,11 @@ ENV NODE_ENV=production \
 USER node
 EXPOSE 8080
 
-# Lightweight liveness check — the app exposes /api/health (mounted at
-# /api by app.ts).  Exits non-zero if the server isn't responding.
+# Lightweight liveness check — health route is /healthz (defined in
+# routes/health.ts), mounted under /api by app.ts → /api/healthz.
+# Exits non-zero if the server isn't responding.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "require('http').get('http://127.0.0.1:'+process.env.PORT+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD node -e "require('http').get('http://127.0.0.1:'+process.env.PORT+'/api/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "--enable-source-maps", "dist/index.mjs"]

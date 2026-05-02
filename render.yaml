@@ -17,7 +17,7 @@ services:
     region: singapore    # change to oregon / frankfurt / ohio if you prefer
     branch: deploy/render
     dockerfilePath: ./Dockerfile
-    healthCheckPath: /api/health
+    healthCheckPath: /api/healthz
     autoDeploy: true
     # Free plan does not support disks. Uncomment after upgrading to Starter+:
     # disk:

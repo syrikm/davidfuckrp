@@ -6419,6 +6419,15 @@ async function handleFriendProxy({
     // identical upstream requests, wasting tokens on avoidable misses.
     sanitizeClaudeSamplingParams(b);
 
+    // SMOKING-GUN debug: prove what mother actually sends to the friend sub-node.
+    // Logs the outbound model + provider block + the route we detected, so we
+    // can tell whether (a) the lock is missing here, or (b) the friend strips it.
+    req.log.info({
+      outboundModel: b["model"],
+      outboundProvider: b["provider"],
+      detectedRoute: detectAbsoluteProviderRoute(model),
+    }, "[OUTBOUND_DEBUG] friend-proxy request body");
+
     return b;
   };
 
@@ -6426,10 +6435,21 @@ async function handleFriendProxy({
   if (!stream) {
     // True upstream task lifetime for non-streaming inference. This is intentionally
     // decoupled from SSE reconnect windows so long reasoning jobs are not hard-killed.
+    const _outboundBody = buildBody(messages);
+    const _outboundJson = JSON.stringify(_outboundBody);
+    // WIRE-LEVEL DEBUG: log the actual byte stream sent on the wire so we can
+    // prove conclusively whether the provider lock survives JSON serialization.
+    req.log.info({
+      backendUrl: `${backend.url}/v1/chat/completions`,
+      wireBytes: _outboundJson.length,
+      wirePreview: _outboundJson.length > 1500
+        ? _outboundJson.slice(0, 750) + "...[" + (_outboundJson.length - 1500) + " bytes]..." + _outboundJson.slice(-750)
+        : _outboundJson,
+    }, "[WIRE_DEBUG] friend-proxy outbound JSON");
     const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(buildBody(messages)),
+      body: _outboundJson,
       signal: AbortSignal.timeout(GATEWAY_TIMEOUTS.upstreamLongPollMs),
     });
     if (!fetchRes.ok) {

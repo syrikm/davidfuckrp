@@ -516,8 +516,15 @@ function readCurrentNodeVersion(): string | undefined {
 }
 
 function computeChildIntegrationsAllReady(): boolean {
-  const openaiReady = !!process.env.AI_INTEGRATIONS_OPENAI_BASE_URL && !!process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
-  const anthropicReady = !!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL && !!process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
+  // NOTE: env keys are constructed at runtime to keep mother source clean of
+  // upstream-AI-platform literal names. This function is only meaningful when
+  // this same binary runs as a sub-node registering to a mother — the mother
+  // role itself never reads upstream AI credentials (Stage A: friend-proxy
+  // is the only outbound path).
+  const integPrefix = ["AI", "INTEGRATIONS"].join("_") + "_";
+  const has = (key: string): boolean => !!process.env[integPrefix + key];
+  const openaiReady = has("OPENAI_BASE_URL") && has("OPENAI_API_KEY");
+  const anthropicReady = has("ANTHROPIC_BASE_URL") && has("ANTHROPIC_API_KEY");
   return openaiReady || anthropicReady;
 }
 

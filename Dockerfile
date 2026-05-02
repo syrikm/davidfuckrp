@@ -14,7 +14,12 @@
 #
 # Targets ClawCloud Run / Cloud Run / Render / Fly.io / any K8s.
 # ============================================================================
-FROM node:24-alpine AS builder
+# node:24-slim (Debian glibc) — NOT alpine (musl).
+# pnpm-workspace.yaml `overrides:` excludes every musl platform variant of
+# rollup / lightningcss / @tailwindcss/oxide ("linux-x64-musl": "-"), so
+# `vite build` on Alpine fails at rollup's native.js load. Debian glibc
+# matches the only non-excluded linux variant: linux-x64-gnu.
+FROM node:24-slim AS builder
 
 WORKDIR /build
 RUN corepack enable && corepack prepare pnpm@latest --activate
@@ -52,11 +57,14 @@ RUN pnpm --filter @workspace/api-server run build
 RUN pnpm --filter @workspace/api-server deploy --prod --legacy /app
 
 # ----------------------------------------------------------------------------
-FROM node:24-alpine AS runtime
+FROM node:24-slim AS runtime
 
 # tini: PID 1 signal handling so SIGTERM from the orchestrator actually
 # stops node cleanly instead of being swallowed.
-RUN apk add --no-cache tini
+# Debian path is /usr/bin/tini (Alpine was /sbin/tini).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
@@ -88,5 +96,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+process.env.PORT+'/api/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "--enable-source-maps", "dist/index.mjs"]

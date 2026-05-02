@@ -176,7 +176,53 @@ STORAGE_S3_SECRET_ACCESS_KEY=<r2-secret-key>
 
 ## 版本
 
-当前版本：**V1.1.8**（见 `version.json`）
+当前版本：**V1.1.9**（见 `version.json`）
+
+## 上游文档复核（Task #5）
+
+**复核日期：** 2026-05-02  
+**报告文件：** `docs/upstream-crosscheck/REPORT.md`  
+**来源索引：** `docs/upstream-crosscheck/sources.md`  
+**测试脚本：** `scripts/upstream-crosscheck.sh`
+
+覆盖范围：OpenRouter、OpenAI、Anthropic Messages、Gemini generateContent、AWS Bedrock（经 OpenRouter）、GCP Vertex AI（经 OpenRouter）
+
+| 类别 | Pass | Fail（已修复） | Deferred | N-A |
+|------|------|----------------|----------|-----|
+| OpenRouter 路由 | 4 | 0 | 1 | 0 |
+| OpenAI inbound | 7 | 0 | 0 | 0 |
+| Anthropic inbound | 5 | 1 | 1 | 1 |
+| Gemini inbound | 4 | 1 | 0 | 0 |
+| 缓存 | 2 | 0 | 1 | 0 |
+| Reasoning tokens | 1 | 0 | 1 | 0 |
+| Bedrock/Vertex 透传 | 1 | 0 | 0 | 3 |
+| **合计** | **24** | **2** | **4** | **4** |
+
+### 已修复偏差
+
+| ID | 文件 | 描述 |
+|----|------|------|
+| F-001 (§P-015) | `normalize.ts` — `normalizeAnthropic` | Anthropic `stop_sequences` 未映射到 `ir.stop`；修复后正确转换为 OpenRouter `stop` 字段。Spec: https://docs.anthropic.com/en/api/messages#stop_sequences |
+| F-002 (§P-022) | `normalize.ts` — `normalizeGemini` + `normalizeGeminiReasoningConfig` | Gemini `thinkingConfig` 读取了错误字段名（`enabled`/`maxOutputTokens`/`include_reasoning`）和错误路径（`body.reasoningConfig` 而非 `body.generationConfig.thinkingConfig`）；修复后使用官方字段 `thinkingBudget`/`includeThoughts`/`thinkingLevel` 并从 `generationConfig.thinkingConfig` 读取。Spec: https://ai.google.dev/api/generate-content#ThinkingConfig |
+
+### 证据文件（Evidence captures）
+
+- **生成工具：** `scripts/evidence-gen.ts` → `scripts/evidence-gen.mjs`（esbuild 编译，直接调用 gateway normalize + buildOpenRouterRequest）
+- **证据目录：** `docs/upstream-crosscheck/captures/` — 22 个 IR+outbound JSON 文件 + `summary.json`
+- **运行结果：** 22 PASS, 0 FAIL（2026-05-02）
+- **可重复执行：** `bash scripts/upstream-crosscheck.sh`（normalization matrix，无需 backend）
+- **含 backend 实测：** `bash scripts/upstream-crosscheck.sh --live`（需配置 `GATEWAY_URL` + `GATEWAY_API_KEY`）
+
+### Debug 约束（任何 debug 必须引用官方文档锚点）
+
+**硬约束**：任何针对 gateway normalize / openrouter / stream / execute 代码的 debug 修改：
+1. 改动行附近必须有 `// Spec: <官方URL>#<anchor>` 注释
+2. Commit message 必须写 `Fixes: REPORT.md §<编号>; Spec: <URL>#<anchor>`
+3. 缺乏官方文档锚点支持的修改一律标 `Needs spec, deferred`，不得盲目猜测修改
+
+**DEBUG_OUTBOUND 开关**（可选）：
+- `GATEWAY_DEBUG_NORMALIZE=1` — 启用 `/v1/debug/normalize` 端点（仅开发环境），
+  接受任意请求体，返回 `{ protocol, ir, outbound }` JSON，不访问任何 backend。
 
 ## 持久化文件
 

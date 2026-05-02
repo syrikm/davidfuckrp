@@ -32,6 +32,10 @@ localPort = 8082
 externalPort = 3002
 
 [[ports]]
+localPort = 8099
+externalPort = 8099
+
+[[ports]]
 localPort = 24927
 externalPort = 3000
 
@@ -41,3 +45,8 @@ externalPort = 3001
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.development]
+GATEWAY_DEBUG_NORMALIZE = "1"

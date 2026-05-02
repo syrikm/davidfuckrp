@@ -86,9 +86,21 @@ function normalizeGeminiReasoningConfig(value: unknown): GatewayReasoningConfig 
   if (!isRecord(value)) return undefined;
 
   const reasoning: GatewayReasoningConfig = {};
-  if (typeof value.enabled === "boolean") reasoning.enabled = value.enabled;
-  if (typeof value.maxOutputTokens === "number") reasoning.maxTokens = value.maxOutputTokens;
-  if (typeof value.include_reasoning === "boolean") reasoning.includeReasoning = value.include_reasoning;
+
+  // Official Gemini ThinkingConfig field names
+  // Spec: https://ai.google.dev/api/generate-content#ThinkingConfig
+  if (typeof value.thinkingBudget === "number") reasoning.maxTokens = value.thinkingBudget;
+  if (typeof value.includeThoughts === "boolean") reasoning.includeReasoning = value.includeThoughts;
+  if (typeof value.thinkingLevel === "string") {
+    if (value.thinkingLevel === "ENABLED") reasoning.enabled = true;
+    else if (value.thinkingLevel === "DISABLED") reasoning.enabled = false;
+    else if (value.thinkingLevel === "DYNAMIC") { reasoning.enabled = true; reasoning.interleaved = true; }
+  }
+
+  // Gateway-extension field names (backward-compat fallbacks when official fields absent)
+  if (typeof value.enabled === "boolean" && reasoning.enabled === undefined) reasoning.enabled = value.enabled;
+  if (typeof value.maxOutputTokens === "number" && reasoning.maxTokens === undefined) reasoning.maxTokens = value.maxOutputTokens;
+  if (typeof value.include_reasoning === "boolean" && reasoning.includeReasoning === undefined) reasoning.includeReasoning = value.include_reasoning;
 
   return Object.keys(reasoning).length > 0 ? reasoning : undefined;
 }
@@ -590,6 +602,9 @@ function normalizeAnthropic(body: Record<string, unknown>): GatewayNormalizeResu
   ir.verbosity = normalizeVerbosity(body.verbosity);
   ir.provider = normalizeProvider(body.provider);
   ir.cache = normalizeCacheControl(body.cache_control);
+  // Spec: https://docs.anthropic.com/en/api/messages#stop_sequences
+  // Anthropic uses `stop_sequences` (not `stop`); map to ir.stop for OpenRouter forwarding.
+  ir.stop = asStringArray(body.stop_sequences) ?? asStringArray(body.stop);
   ir.maxOutputTokens = firstNumber(body.max_output_tokens, body.max_completion_tokens, body.max_tokens);
   ir.metadata.rawHints = {
     anthropicVersion: typeof body.anthropic_version === "string" ? body.anthropic_version : undefined,
@@ -632,6 +647,8 @@ function normalizeAnthropic(body: Record<string, unknown>): GatewayNormalizeResu
     "verbosity",
     "provider",
     "cache_control",
+    "stop_sequences",
+    "stop",
     "max_tokens",
     "max_completion_tokens",
     "max_output_tokens",
@@ -676,6 +693,10 @@ function normalizeGemini(body: Record<string, unknown>): GatewayNormalizeResult 
   );
   ir.stop = asStringArray(body.stop) ?? (generationConfig ? asStringArray(generationConfig.stopSequences) : undefined);
   ir.reasoning = mergeReasoningConfigs(
+    // Official Gemini ThinkingConfig path: generationConfig.thinkingConfig
+    // Spec: https://ai.google.dev/api/generate-content#ThinkingConfig
+    normalizeGeminiReasoningConfig(generationConfig?.thinkingConfig),
+    // Backward-compat: gateway-specific top-level reasoningConfig field
     normalizeGeminiReasoningConfig(body.reasoningConfig),
     normalizeReasoningRecord(body.reasoning),
     normalizeReasoningShorthand(body.include_reasoning, body.reasoning_effort),

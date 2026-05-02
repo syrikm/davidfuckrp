@@ -2808,6 +2808,24 @@ function requireApiKeyWithQuery(req: Request, res: Response, next: () => void) {
 // Routes
 // ---------------------------------------------------------------------------
 
+// Debug-only: dump normalized IR + outbound OpenRouter request shape without
+// hitting any backend.  Only active when GATEWAY_DEBUG_NORMALIZE=1.
+// Used by scripts/upstream-crosscheck.sh to produce evidence captures.
+router.post("/v1/debug/normalize", requireApiKey, async (req: Request, res: Response) => {
+  if (process.env["GATEWAY_DEBUG_NORMALIZE"] !== "1") {
+    res.status(404).json({ error: "debug endpoint disabled" });
+    return;
+  }
+  try {
+    const detection = detectGatewayProtocol(req.body);
+    const normalized = normalizeGatewayRequest(req.body, detection);
+    const outbound  = buildOpenRouterRequest(normalized.ir);
+    res.json({ protocol: normalized.protocol, ir: normalized.ir, outbound });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 router.post("/api", requireApiKey, async (req: Request, res: Response) => {
   const detection = detectGatewayProtocol(req.body);
   const normalized = normalizeGatewayRequest(req.body, detection);

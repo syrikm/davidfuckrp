@@ -1,0 +1,142 @@
+{
+  "generatedAt": "2026-05-02T15:01:43.078698Z",
+  "generatedBy": "live gateway /v1/debug/normalize endpoint",
+  "evidenceType": "live-http",
+  "captureFormat": ".outbound.json (protocol + ir + outbound from running gateway)",
+  "totalPass": 22,
+  "totalFail": 0,
+  "results": [
+    {
+      "id": "P-001-bedrock",
+      "ok": true,
+      "desc": "bedrock/ prefix \u2192 provider.only=[amazon-bedrock], allow_fallbacks=false",
+      "captureFile": "P-001-bedrock.outbound.json"
+    },
+    {
+      "id": "P-001-vertex",
+      "ok": true,
+      "desc": "vertex/ prefix \u2192 provider.only=[google-vertex], allow_fallbacks=false",
+      "captureFile": "P-001-vertex.outbound.json"
+    },
+    {
+      "id": "P-001-anthropic",
+      "ok": true,
+      "desc": "anthropic/ prefix \u2192 provider.only=[anthropic], allow_fallbacks=false",
+      "captureFile": "P-001-anthropic.outbound.json"
+    },
+    {
+      "id": "P-001-groq",
+      "ok": true,
+      "desc": "groq/ prefix \u2192 provider.only=[groq], allow_fallbacks=false",
+      "captureFile": "P-001-groq.outbound.json"
+    },
+    {
+      "id": "P-002",
+      "ok": true,
+      "desc": "client allow_fallbacks:true overridden when bedrock lock active",
+      "captureFile": "P-002.outbound.json"
+    },
+    {
+      "id": "P-003-passthrough",
+      "ok": true,
+      "desc": "openrouter/<bare-model> \u2014 no recognized sub-prefix \u2192 no allow_fallbacks forced",
+      "captureFile": "P-003-passthrough.outbound.json"
+    },
+    {
+      "id": "P-005-roles",
+      "ok": true,
+      "desc": "OpenAI system+user roles preserved in ir.messages",
+      "captureFile": "P-005-roles.outbound.json"
+    },
+    {
+      "id": "P-009-max-tokens",
+      "ok": true,
+      "desc": "max_completion_tokens \u2192 ir.maxOutputTokens, outbound max_tokens",
+      "captureFile": "P-009-max-tokens.outbound.json"
+    },
+    {
+      "id": "P-010-reasoning-effort",
+      "ok": true,
+      "desc": "reasoning_effort:high \u2192 ir.reasoning.effort=high",
+      "captureFile": "P-010-reasoning-effort.outbound.json"
+    },
+    {
+      "id": "P-012-thinking",
+      "ok": true,
+      "desc": "Anthropic thinking.budget_tokens=1024 \u2192 ir.reasoning.maxTokens=1024",
+      "captureFile": "P-012-thinking.outbound.json"
+    },
+    {
+      "id": "P-013-anthropic-native",
+      "ok": true,
+      "desc": "anthropic_version field \u2192 protocol=anthropic-messages",
+      "captureFile": "P-013-anthropic-native.outbound.json"
+    },
+    {
+      "id": "P-014-system",
+      "ok": true,
+      "desc": "Anthropic system string \u2192 prepended system role in ir.messages",
+      "captureFile": "P-014-system.outbound.json"
+    },
+    {
+      "id": "P-015-stop-sequences",
+      "ok": true,
+      "desc": "F-001: stop_sequences\u2192ir.stop\u2192outbound.stop (NOT stop_sequences)",
+      "captureFile": "P-015-stop-sequences.outbound.json"
+    },
+    {
+      "id": "P-019-gemini-roles",
+      "ok": true,
+      "desc": "Gemini contents role=model \u2192 assistant in ir.messages",
+      "captureFile": "P-019-gemini-roles.outbound.json"
+    },
+    {
+      "id": "P-021-stop-sequences",
+      "ok": true,
+      "desc": "Gemini generationConfig.stopSequences \u2192 ir.stop",
+      "captureFile": "P-021-stop-sequences.outbound.json"
+    },
+    {
+      "id": "P-022-thinkingBudget",
+      "ok": true,
+      "desc": "F-002: generationConfig.thinkingConfig.thinkingBudget=1024 \u2192 ir.reasoning.maxTokens=1024",
+      "captureFile": "P-022-thinkingBudget.outbound.json"
+    },
+    {
+      "id": "P-022-DISABLED",
+      "ok": true,
+      "desc": "F-002: thinkingLevel=DISABLED \u2192 ir.reasoning.enabled=false",
+      "captureFile": "P-022-DISABLED.outbound.json"
+    },
+    {
+      "id": "P-022-DYNAMIC",
+      "ok": true,
+      "desc": "F-002: thinkingLevel=DYNAMIC \u2192 ir.reasoning.enabled=true, interleaved=true",
+      "captureFile": "P-022-DYNAMIC.outbound.json"
+    },
+    {
+      "id": "P-022-compat-reasoningConfig",
+      "ok": true,
+      "desc": "Backward compat: body.reasoningConfig.enabled=true \u2192 ir.reasoning.enabled=true",
+      "captureFile": "P-022-compat-reasoningConfig.outbound.json"
+    },
+    {
+      "id": "P-025-caching",
+      "ok": true,
+      "desc": "cache_control.type=ephemeral \u2192 ir.cache.mode=ephemeral",
+      "captureFile": "P-025-caching.outbound.json"
+    },
+    {
+      "id": "P-027-reasoning",
+      "ok": true,
+      "desc": "reasoning.max_tokens=512 \u2192 ir.reasoning.maxTokens=512",
+      "captureFile": "P-027-reasoning.outbound.json"
+    },
+    {
+      "id": "NA-003-bedrock-model-id",
+      "ok": true,
+      "desc": "Bedrock model ID \u2192 amazon-bedrock lock",
+      "captureFile": "NA-003-bedrock-model-id.outbound.json"
+    }
+  ]
+}

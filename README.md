@@ -12,13 +12,28 @@ OpenAI / Anthropic 兼容的 AI 代理网关，**母节点**。
 
 ---
 
-## 一键部署
+## 一键部署（Render 免费层）
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/syrikm/davidfuckrp&branch=deploy/render)
 
-> **首次点击需要授权 Render 访问私有仓库**。Render → Account Settings → GitHub → Configure → 授予 `davidfuckrp` 访问权限。
+**默认配置 = $0/月免费计划**：512 MB RAM、新加坡区、15 分钟无请求自动休眠（下次请求冷启动 ~30s）。
+
+> **首次点击需要授权 Render 访问私有仓库**。Render → 头像 → Account Settings → GitHub → Configure → 给 Render 授予 `davidfuckrp` 访问权。
 >
-> 部署后必填：环境变量 `PROXY_API_KEY`（Render UI 会提示）。其他环境变量按需配（`OPENROUTER_API_KEY`、`S3_*` 等）。
+> 部署后必填一个 Secret：`PROXY_API_KEY`（任意随机串，例如 `openssl rand -hex 32` 生成）。
+
+### ⚠️ 免费层两个限制
+
+1. **没有持久磁盘** —— Render 免费层不支持 disk，容器重启 / 重新部署会丢本地数据（模型注册表、用法统计、缓存）。
+2. **15 分钟空闲就 sleep**。
+
+→ **要持久化就改用 S3/R2 存储**（数据存对象存储里，容器死了不丢）：
+- 注册 [Cloudflare R2](https://developers.cloudflare.com/r2/)（免费 10 GB + 100 万次/月写入）
+- 在 Render 环境变量里设：`STORAGE_BACKEND=s3` + `S3_ENDPOINT` + `S3_REGION=auto` + `S3_BUCKET` + `S3_ACCESS_KEY_ID` + `S3_SECRET_ACCESS_KEY`
+
+### 升级到付费（$7/mo Starter）
+
+不想 sleep + 想要持久磁盘 → Render UI 里 **Settings → Instance Type → Starter**，然后取消 `render.yaml` 里 `disk:` 段的注释、`plan: free` 改 `plan: starter`，commit 推一下即可。
 
 其他平台（Fly.io / Zeabur / Railway / 本地 Docker）：见 [`DEPLOY.md`](./DEPLOY.md)。
 

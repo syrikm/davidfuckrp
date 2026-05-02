@@ -322,7 +322,37 @@ const BUILTIN_REGISTRY_RELATIVE_CANDIDATES = [
   "lib/models/registry.json",
 ] as const;
 
-const PROVIDER_ROUTE_PREFIXES = new Set(["bedrock", "vertex", "anthropic", "google", "openrouter"]);
+// Mirror of the absolute-routing prefix table in lib/gateway/provider.ts.
+// Kept as a static set here to avoid a circular import; both lists must
+// stay in sync — see docs/vendors/ROUTING_AUDIT.md §3.
+const PROVIDER_ROUTE_PREFIXES = new Set([
+  // Cloud Anthropic backends
+  "bedrock", "amazon-bedrock",
+  "vertex", "google-vertex", "anthropic-vertex",
+  "anthropic", "anthropic-direct",
+  // Google
+  "aistudio", "google-ai-studio", "google",
+  // First-party
+  "openai", "openai-direct",
+  "x-ai", "xai",
+  "deepseek", "deepseek-direct",
+  "mistral", "mistralai",
+  "cohere",
+  "perplexity",
+  "moonshotai", "moonshot",
+  "z-ai", "zai",
+  // Fast-inference partner clouds
+  "groq", "cerebras", "sambanova",
+  "fireworks", "fireworks-ai",
+  "together", "togetherai",
+  "deepinfra", "novita", "novitaai",
+  "hyperbolic", "lambda", "cloudflare",
+  "friendli", "featherless", "mancer", "parasail",
+  "baseten", "replicate", "nebius", "chutes",
+  "azure", "azure-openai",
+  // Pass-through
+  "openrouter", "auto",
+]);
 
 let builtinRegistryCache: BuiltinRegistryDocument | null = null;
 let builtinRegistryIndexCache: BuiltinRegistryIndex | null = null;

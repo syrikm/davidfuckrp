@@ -43,6 +43,57 @@
 - **外部客户端**（CherryStudio 等）直接访问 api-server 域名，使用 `/v1/*` 路径
 - **Portal 内部调用**通过 Replit 路由代理，使用 `/api/v1/*` 路径（api-server 双重挂载 proxyRouter 在 `/` 和 `/api`）
 
+## 绝对 Provider 路由（Absolute Provider Routing）
+
+**契约**：当请求模型 ID 携带路由前缀（如 `bedrock/claude-sonnet-4.5`、`vertex/gemini-2.5-pro`、`anthropic/claude-opus-4.5`、`openai/gpt-5-mini`、`groq/llama-3.3-70b`），网关必须将该请求**硬锁定**到对应的 OpenRouter 子通道：
+
+```jsonc
+"provider": {
+  "only": ["<canonical-or-slug>"],
+  "order": ["<canonical-or-slug>"],
+  "allow_fallbacks": false
+}
+```
+
+客户端无法绕过：任何客户端传入的 `provider.only` / `provider.order` / `provider.allow_fallbacks` 在前缀锁定生效时**会被强制覆盖**（`sort` 等其它字段保留）。
+
+**单一真相源**：`artifacts/api-server/src/lib/gateway/provider.ts` 的 `PROVIDER_PREFIX_SPECS`（30+ 条目，覆盖所有 OpenRouter 文档化的 provider slug）。`modelRegistry.ts#PROVIDER_ROUTE_PREFIXES` 与 `routes/proxy.ts` 中的检测必须与之保持同步——通过共享的 `detectAbsoluteProviderRoute()` 与 `listAbsoluteProviderPrefixAliases()` 实现。
+
+**三道防线**（深度防御）：
+1. `mergeGatewayProviderConfig()`（`/api` 统一网关路径）
+2. `buildAbsoluteProviderBlock()`（`/v1/chat/completions` 与 `/v1/messages` 旧路径）
+3. `buildProvider()`（`openrouter.ts` 序列化层 — 即使前两道丢失也兜底）
+
+**直通别名**：`openrouter/...` 与 `auto/...` 仅剥离前缀，不注入 provider 锁，让 OpenRouter 默认选择后端。
+
+**后端能力门控**：当锁定生效时，`execute.ts`、`/v1/chat/completions` 和 `/v1/messages` 都会先调用 `checkAbsoluteRoutingCapability(slug)`：若全部子节点都没有声明对该 provider slug 的支持（`reportedModels[*].provider`），则直接返回 `422 provider_capability_missing`，避免悄悄违约。子节点在没有 reported-models 数据时按"未知 → 视为可服务"宽松处理（向下兼容）。响应头 `X-Gateway-Locked-Provider` / `X-Gateway-Allow-Fallbacks` / `X-Gateway-Provider-Prefix` 可被客户端用来自检锁定是否生效。
+
+详见 `docs/vendors/ROUTING_AUDIT.md`、断言式回归测试 `scripts/test-absolute-routing.ts`，以及包装脚本 `scripts/test-absolute-routing.sh`。
+
+### 供应商文档来源（vendor docs provenance）
+
+下表列出本次绝对路由实现所依据的全部上游文档、原始 URL，以及抓取时间（UTC）。每个 markdown 文件首行的 HTML 注释也保留同样的元数据，便于核对。
+
+| 文件 | 来源 URL | 抓取时间 (UTC) |
+|------|---------|----------------|
+| `docs/vendors/openrouter/01-chat-completions.md` | https://openrouter.ai/docs/api-reference/chat-completion | 2026-05-02T12:57:00.503Z |
+| `docs/vendors/openrouter/02-provider-routing.md` | https://openrouter.ai/docs/features/provider-routing | 2026-05-02T12:57:01.615Z |
+| `docs/vendors/openrouter/03-model-routing.md` | https://openrouter.ai/docs/features/model-routing | 2026-05-02T12:57:01.023Z |
+| `docs/vendors/openrouter/04-api-overview.md` | https://openrouter.ai/docs/api-reference/overview | 2026-05-02T12:57:01.026Z |
+| `docs/vendors/openai/01-chat-completions.md` | https://platform.openai.com/docs/api-reference/chat/create | 2026-05-02T12:57:02.009Z |
+| `docs/vendors/openai/02-responses-api.md` | https://platform.openai.com/docs/api-reference/responses/create | 2026-05-02T12:57:04.058Z |
+| `docs/vendors/openai/03-models.md` | https://platform.openai.com/docs/models | 2026-05-02T12:57:02.070Z |
+| `docs/vendors/openai/04-reasoning.md` | https://platform.openai.com/docs/guides/reasoning | 2026-05-02T12:57:02.457Z |
+| `docs/vendors/anthropic/01-messages-api.md` | https://docs.claude.com/en/api/messages | 2026-05-02T12:57:12.916Z |
+| `docs/vendors/anthropic/02-prompt-caching.md` | https://docs.claude.com/en/docs/build-with-claude/prompt-caching | 2026-05-02T12:57:03.029Z |
+| `docs/vendors/anthropic/03-models.md` | https://docs.claude.com/en/docs/about-claude/models/overview | 2026-05-02T12:57:03.550Z |
+| `docs/vendors/anthropic/04-vertex.md` | https://docs.claude.com/en/api/claude-on-vertex-ai | 2026-05-02T12:57:06.109Z |
+| `docs/vendors/anthropic/05-bedrock.md` | https://docs.claude.com/en/api/claude-on-amazon-bedrock | 2026-05-02T12:57:04.448Z |
+| `docs/vendors/google/01-generate-content.md` | https://ai.google.dev/api/generate-content | 2026-05-02T12:57:05.401Z |
+| `docs/vendors/google/02-models.md` | https://ai.google.dev/gemini-api/docs/models | 2026-05-02T12:57:05.855Z |
+| `docs/vendors/google/03-vertex-ai.md` | https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference | 2026-05-02T12:57:08.733Z |
+| `docs/vendors/replit-ai-integrations/01-overview.md` | Replit-internal skills (`.local/skills/ai-integrations-*`) — no external URL | 2026-05-02 |
+
 ## 后端路由
 
 **全部流量通过 Friend Proxy 子节点转发，本地 Replit AI SDK 调用已永久禁用。**

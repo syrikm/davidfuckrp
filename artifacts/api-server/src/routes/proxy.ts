@@ -12,6 +12,7 @@ import {
 } from "../lib/manualModelStore";
 import {
   buildBackendPool,
+  filterBackendPoolByProvider,
   deriveApiBaseUrl,
   derivePublicBaseUrl,
   getAllFriendProxyConfigs,
@@ -68,11 +69,14 @@ import {
 import {
   buildGatewayBridgeRequest,
   buildOpenRouterRequest,
+  detectAbsoluteProviderRoute,
   detectGatewayProtocol,
   executeGatewayRequest,
+  listAbsoluteProviderPrefixAliases,
   normalizeGatewayRequest,
   summarizeIR,
 } from "../lib/gateway";
+import type { GatewayProviderRoute } from "../lib/gateway";
 
 // TS compatibility shim for this artifact build target.
 declare const fetch: any;
@@ -1094,49 +1098,56 @@ function applyModelRoute(id: string): string {
   return route ? route.to : id;
 }
 
-// Normalize provider-prefixed OpenRouter model IDs to canonical form before forwarding
-// to friend backends.  The child node (DYNAMIC_x) adds its own provider pinning via
-// normalizeOpenRouterModel — but OpenRouter rejects pinned requests for many models
-// (e.g. "bedrock/claude-opus-4.5 is not a valid model ID").  By stripping here we let
-// OpenRouter auto-route to the best available provider, which is equivalent behaviour.
+// Normalize provider-prefixed OpenRouter model IDs before forwarding to a
+// friend backend.
 //
-//   bedrock/claude-*   →  anthropic/claude-*
-//   vertex/claude-*    →  anthropic/claude-*
-//   vertex/gemini-*    →  google/gemini-*
-//   aistudio/gemini-*  →  google/gemini-*
-//   anything else      →  unchanged
-// Translate sub-node-known prefixes to OR-canonical forms ONLY when we have
-// an unambiguous mapping; otherwise pass through unchanged so the sub-node's
-// own model registry handles routing.
+// **Absolute provider routing contract** — when a model id carries a routing
+// prefix recognised by `detectAbsoluteProviderRoute()` (bedrock/, vertex/,
+// aistudio/, anthropic/, openai/, groq/, …), the prefix is the source of
+// truth for backend selection.  We MUST keep it intact so that:
 //
-// Why not strip every prefix?  Because the sub-node's chat handler already
-// understands bedrock/, vertex/, aistudio/ prefixes natively (per child
-// `mapModelToOR`: bedrock/claude-* → anthropic + provider:only=bedrock;
-// vertex/gemini-* → google + provider:only=google-vertex; etc).  Stripping
-// to a bare name like `vertex/gemma-3-12b-it` → `gemma-3-12b-it` makes the
-// sub-node consult its bare-name registry, which routes that bare id to a
-// non-existent Vertex deployment and 404s.  Keep the prefix and let the
-// sub-node route — it knows what to do.
+//   1. handleFriendProxy() can detect it and inject
+//      `provider: { only: [<slug>], allow_fallbacks: false }` on the wire,
+//      and
+//   2. the sub-node's own router sees the same prefix it would receive
+//      directly from a vendor SDK.
+//
+// The historical behaviour of rewriting `bedrock/claude-*` → `anthropic/claude-*`
+// stripped the routing intent and forced OpenRouter to fall back to its
+// default provider order — silently violating the absolute-routing contract.
+// That rewrite is now removed; see ROUTING_AUDIT.md §4.
 function normalizeFriendModel(m: string): string {
-  if (m.startsWith("bedrock/")) {
-    return "anthropic/" + m.slice("bedrock/".length);
-  }
-  if (m.startsWith("vertex/")) {
-    const rest = m.slice("vertex/".length);
-    if (/^claude-/.test(rest)) return "anthropic/" + rest;
-    if (/^gemini-/.test(rest)) return "google/" + rest;
-    // gemma, llama, mistral and other open-weight models hosted on Vertex are
-    // also published on multiple OR backends.  Map to google/ when unambiguous;
-    // otherwise leave prefix intact so the sub-node picks the right path.
-    if (/^gemma-/.test(rest)) return "google/" + rest;
-    return m;
-  }
-  if (m.startsWith("aistudio/")) {
-    const rest = m.slice("aistudio/".length);
-    if (/^gemini-/.test(rest)) return "google/" + rest;
-    return m;
-  }
   return m;
+}
+
+// Build the OpenRouter `provider` block for an absolute-routing prefix.
+//
+//   • Forces `only: [<slug>]` to lock the request to a single sub-channel.
+//   • Forces `allow_fallbacks: false` — clients cannot opt out.
+//   • Forces `order: [<slug>]` for stable observability.
+//   • Preserves any unrelated client-supplied keys (`sort`, `data_collection`,
+//     `quantizations`, etc.) so existing requests keep working.
+//   • Silently overwrites any conflicting client-supplied `only` /
+//     `allow_fallbacks` / `order` — does NOT throw.  The lock is the
+//     contract; the client cannot widen or escape it, but the request
+//     still succeeds against the locked provider.
+function buildAbsoluteProviderBlock(
+  route: GatewayProviderRoute,
+  clientProvider: unknown,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (clientProvider && typeof clientProvider === "object" && !Array.isArray(clientProvider)) {
+    for (const [k, v] of Object.entries(clientProvider as Record<string, unknown>)) {
+      // Strip the keys we are about to force-set so we don't accidentally
+      // preserve a stale client value.
+      if (k === "only" || k === "allow_fallbacks" || k === "order") continue;
+      out[k] = v;
+    }
+  }
+  if (route.order?.length) out.order = [...route.order];
+  if (route.only?.length) out.only = [...route.only];
+  out.allow_fallbacks = false;
+  return out;
 }
 
 // fetchOpenRouterModels — NEVER uses Replit AI Integrations.
@@ -1282,7 +1293,19 @@ setInterval(fetchORPricingDirect, 6 * 60 * 60 * 1_000);
 // ---------------------------------------------------------------------------
 
 type Backend =
-  | { kind: "friend"; label: string; url: string; apiKey: string }
+  | {
+      kind: "friend";
+      label: string;
+      url: string;
+      apiKey: string;
+      /**
+       * Set of OpenRouter provider slugs this sub-node is known to be able
+       * to reach.  Mirrors BackendPoolEntry.providerSlugs (see backendPool.ts
+       * for semantics).  When undefined the node has not reported any model
+       * list and is treated as capable of serving any locked provider.
+       */
+      providerSlugs?: string[];
+    }
   | { kind: "local";  label: "local"; url: "local://self"; apiKey: string };
 
 // ---------------------------------------------------------------------------
@@ -2449,16 +2472,55 @@ function pickBackend(): Backend | null {
   return backend;
 }
 
-function pickBackendForCache(fingerprint: string): Backend | null {
-  return pickBackendRendezvous(buildFullBackendPool(), fingerprint);
+/**
+ * Filter a pool by absolute-routing provider slug if one is set.  Local
+ * backends never advertise specific OpenRouter provider slugs, so when an
+ * absolute lock is in effect we exclude `kind: "local"` entries — the local
+ * node forwards to AI Integrations and cannot guarantee the locked OR
+ * sub-channel.  Friend entries with `providerSlugs == undefined` are
+ * preserved (legacy compatibility, see BackendPoolEntry semantics).
+ */
+function applyAbsoluteRoutingFilter(
+  pool: Backend[],
+  providerSlug: string | undefined,
+): Backend[] {
+  if (!providerSlug) return pool;
+  const friendsOnly = pool.filter((b) => b.kind === "friend") as Array<Extract<Backend, { kind: "friend" }>>;
+  return filterBackendPoolByProvider(friendsOnly, providerSlug);
 }
 
-function pickBackendForCacheExcluding(fingerprint: string, exclude: Set<string>): Backend | null {
-  return pickBackendRendezvous(buildFullBackendPool(), fingerprint, exclude);
+/**
+ * Pre-flight capability check for absolute provider routing.  Returns
+ * whether at least one sub-node in the current pool is known to be able to
+ * serve the locked provider, plus pool sizes for diagnostic 422 responses.
+ */
+function checkAbsoluteRoutingCapability(providerSlug: string): {
+  canServe: boolean;
+  poolSize: number;
+  eligibleSize: number;
+} {
+  const pool = buildFullBackendPool();
+  const eligible = applyAbsoluteRoutingFilter(pool, providerSlug);
+  return { canServe: eligible.length > 0, poolSize: pool.length, eligibleSize: eligible.length };
 }
 
-function pickBackendExcluding(exclude: Set<string>): Backend | null {
-  const friends = buildFullBackendPool().filter(
+function pickBackendForCache(fingerprint: string, providerSlug?: string): Backend | null {
+  const pool = applyAbsoluteRoutingFilter(buildFullBackendPool(), providerSlug);
+  return pickBackendRendezvous(pool, fingerprint);
+}
+
+function pickBackendForCacheExcluding(
+  fingerprint: string,
+  exclude: Set<string>,
+  providerSlug?: string,
+): Backend | null {
+  const pool = applyAbsoluteRoutingFilter(buildFullBackendPool(), providerSlug);
+  return pickBackendRendezvous(pool, fingerprint, exclude);
+}
+
+function pickBackendExcluding(exclude: Set<string>, providerSlug?: string): Backend | null {
+  const pool = applyAbsoluteRoutingFilter(buildFullBackendPool(), providerSlug);
+  const friends = pool.filter(
     (b) => b.kind === "friend" && !exclude.has(b.url)
   );
   if (friends.length === 0) return null;
@@ -3749,7 +3811,40 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   const MAX_FRIEND_RETRIES = Math.max(3, getFriendProxyConfigs().length - 1);
   const triedFriendUrls = new Set<string>();
   const cacheFingerprint = buildCacheFingerprint(selectedModel, finalMessages);
-  let backend = pickBackendForCache(cacheFingerprint);
+
+  // ── Absolute-routing capability gate ────────────────────────────────────
+  // If the model id locks the request to a specific OpenRouter provider
+  // slug, refuse early with 422 when no sub-node reports support for it —
+  // otherwise we'd silently violate the absolute-routing contract.
+  const ccRouteForCapability = detectAbsoluteProviderRoute(selectedModel);
+  const ccLockedSlug = ccRouteForCapability?.provider;
+  if (ccLockedSlug) {
+    const cap = checkAbsoluteRoutingCapability(ccLockedSlug);
+    if (!cap.canServe && cap.poolSize > 0) {
+      finishInflight?.();
+      req.log.warn({
+        model: selectedModel,
+        providerPrefix: ccRouteForCapability?.prefix,
+        providerSlug: ccLockedSlug,
+        poolSize: cap.poolSize,
+      }, "Absolute routing: no sub-node reports capability for locked provider (/v1/chat/completions)");
+      res.status(422).json({
+        error: {
+          message:
+            `No registered sub-node can serve provider "${ccLockedSlug}" ` +
+            `(model "${selectedModel}" hard-locks to it via prefix "${ccRouteForCapability?.prefix}"). ` +
+            `Add a sub-node whose OpenRouter account has access to this provider, ` +
+            `or remove the routing prefix to allow OpenRouter's default selection.`,
+          type: "provider_capability_missing",
+          providerPrefix: ccRouteForCapability?.prefix,
+          providerSlug: ccLockedSlug,
+        },
+      });
+      return;
+    }
+  }
+
+  let backend = pickBackendForCache(cacheFingerprint, ccLockedSlug);
   if (!backend) {
     finishInflight?.();
     res.status(503).json({ error: { message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends or enable local node (requires AI_INTEGRATIONS env vars).", type: "service_unavailable" } });
@@ -3774,7 +3869,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       if (backend.kind === "local") {
         // Defensive double-check: if the setting was toggled off mid-request, skip local immediately.
         if (!getEnableLocalNode()) {
-          const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls);
+          const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls, ccLockedSlug);
           if (next && attempt < MAX_FRIEND_RETRIES) { backend = next; continue; }
           finishInflight?.();
           res.status(503).json({ error: { message: "Local node is disabled. Add friend proxy sub-nodes to serve requests.", type: "service_unavailable" } });
@@ -3795,7 +3890,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
           return;
         }
         // Local failed — try friend backends
-        const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls);
+        const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls, ccLockedSlug);
         if (!next || attempt >= MAX_FRIEND_RETRIES) {
           finishInflight?.();
           const errPayload = (() => { try { return JSON.parse(localResult.message ?? "{}"); } catch { return { error: { message: localResult.message, type: "upstream_error" } }; } })();
@@ -3883,7 +3978,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       }
 
       if ((is5xx || isNetworkErr || isRateLimit || is4xxRetryable) && attempt < MAX_FRIEND_RETRIES && !res.headersSent) {
-        const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls);
+        const next = pickBackendForCacheExcluding(cacheFingerprint, triedFriendUrls, ccLockedSlug);
         if (next) {
           backend = next;
           continue;
@@ -4137,6 +4232,48 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const shouldStream = (body.stream as boolean) ?? false;
   const startTime = Date.now();
 
+  // ── Absolute provider routing (model-prefix lock) ─────────────────────────
+  // Same contract as /v1/chat/completions: a routing prefix on the model id
+  // forces `provider.only` + `allow_fallbacks: false` on the wire so the
+  // sub-node hits exactly one OpenRouter sub-channel.  Anthropic-native
+  // /v1/messages is a thin pass-through, so we mutate the body in-place.
+  const messagesRoute = detectAbsoluteProviderRoute(selectedModel);
+  const messagesLockedSlug = messagesRoute?.provider;
+  if (messagesRoute) {
+    body["provider"] = buildAbsoluteProviderBlock(messagesRoute, body["provider"]);
+    req.log.info({
+      model: selectedModel,
+      providerPrefix: messagesRoute.prefix,
+      providerOnly: messagesRoute.only,
+    }, "/v1/messages: absolute provider routing locked");
+  }
+  // Capability gate — refuse 422 when no sub-node reports support for the
+  // locked OpenRouter provider slug (mirror of /v1/chat/completions).
+  if (messagesLockedSlug) {
+    const cap = checkAbsoluteRoutingCapability(messagesLockedSlug);
+    if (!cap.canServe && cap.poolSize > 0) {
+      req.log.warn({
+        model: selectedModel,
+        providerPrefix: messagesRoute?.prefix,
+        providerSlug: messagesLockedSlug,
+        poolSize: cap.poolSize,
+      }, "Absolute routing: no sub-node reports capability for locked provider (/v1/messages)");
+      res.status(422).json({
+        error: {
+          type: "provider_capability_missing",
+          message:
+            `No registered sub-node can serve provider "${messagesLockedSlug}" ` +
+            `(model "${selectedModel}" hard-locks to it via prefix "${messagesRoute?.prefix}"). ` +
+            `Add a sub-node whose OpenRouter account has access to this provider, ` +
+            `or remove the routing prefix to allow OpenRouter's default selection.`,
+          providerPrefix: messagesRoute?.prefix,
+          providerSlug: messagesLockedSlug,
+        },
+      });
+      return;
+    }
+  }
+
   const anthropicFP = buildCacheFingerprintAnthropic(selectedModel, body.system);
   req.log.info({ model: selectedModel, stream: shouldStream, cacheHash: fnv1aHash(anthropicFP) }, "Anthropic /v1/messages → forwarding to friend proxy (cache-affinity)");
 
@@ -4217,7 +4354,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const MAX_MSG_RETRIES = Math.max(3, getFriendProxyConfigs().length - 1);
   const triedMsgUrls = new Set<string>();
 
-  let backend = pickBackendForCache(anthropicFP);
+  let backend = pickBackendForCache(anthropicFP, messagesLockedSlug);
   if (!backend) {
     res.status(503).json({ error: { type: "service_unavailable", message: "No available backends. Add friend proxy sub-nodes via /v1/admin/backends, or enable local node (requires AI_INTEGRATIONS env vars)." } });
     return;
@@ -4231,7 +4368,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
     if (backend.kind === "local") {
       // Defensive double-check: if the setting was toggled off mid-request, skip local immediately.
       if (!getEnableLocalNode()) {
-        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls);
+        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
         if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
         res.status(503).json({ error: { type: "service_unavailable", message: "Local node is disabled. Add friend proxy sub-nodes to serve requests." } });
         return;
@@ -4239,7 +4376,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       const anUrl = (process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] ?? "").replace(/\/+$/, "");
       const orUrl = (process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"] ?? "").replace(/\/+$/, "");
       if (!anUrl && !orUrl) {
-        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls);
+        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
         if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
         res.status(503).json({ error: { type: "service_unavailable", message: "Local node: no ANTHROPIC or OPENROUTER AI_INTEGRATIONS endpoint configured." } });
         return;
@@ -4250,7 +4387,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
           req, res, body as Record<string, unknown>, selectedModel, shouldStream, "local", startTime,
         );
         if (localResult.ok) return;
-        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls);
+        const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
         if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
         res.status(localResult.status ?? 502).json({ error: { message: localResult.message, type: "upstream_error" } });
         return;
@@ -4267,7 +4404,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       const convertedBody = { model: selectedModel, messages: oaiMsgs, max_tokens: body["max_tokens"], stream: shouldStream, temperature: body["temperature"], top_p: body["top_p"] };
       const localResult = await handleLocalChatCompletion(req, res, convertedBody as Record<string, unknown>, selectedModel, shouldStream, "local", startTime);
       if (localResult.ok) return;
-      const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls);
+      const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
       if (next && attempt < MAX_MSG_RETRIES) { backend = next; continue; }
       res.status(localResult.status ?? 502).json({ error: { message: localResult.message, type: "upstream_error" } });
       return;
@@ -4309,7 +4446,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       if (fsStatus >= 500 || fsStatus === 429 || fsStatus === 402) {
         if (attempt < MAX_MSG_RETRIES && !res.headersSent) {
           markUnhealthy(backend.url, backend.apiKey);
-          const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls);
+          const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
           if (next) {
             backend = next;
             // Clean up this iteration's abort/idle resources before retrying.
@@ -4467,7 +4604,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 
     // Retry on a different backend for non-streaming when possible
     if ((is5xx || isNetworkErr || isRateLimit || is4xxRetryable) && attempt < MAX_MSG_RETRIES && !res.headersSent) {
-      const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls);
+      const next = pickBackendForCacheExcluding(anthropicFP, triedMsgUrls, messagesLockedSlug);
       if (next) {
         req.log.info({ from: backend.label, to: next.label, attempt }, "/v1/messages: retrying on different backend");
         backend = next;
@@ -6397,16 +6534,29 @@ async function handleFriendProxy({
       }
     }
 
-    // ── OR Preferred Provider — force-route to Bedrock if configured ─────────
-    // Setting orPreferredProvider="bedrock" (default) injects provider.order for
-    // all anthropic/* OpenRouter model requests so OpenRouter always uses AWS Bedrock.
-    // Only applies if the client didn't already specify a provider preference.
-    // Bedrock advantages: content-keyed cache (no sticky routing needed), ZDR,
-    // and typically lower cost for high-volume Claude traffic.
+    // ── Absolute provider routing (model-prefix lock) ────────────────────────
+    // Every model id forwarded through handleFriendProxy is checked for an
+    // absolute-routing prefix (bedrock/, vertex/, anthropic/, openai/, groq/,
+    // …).  When matched, the request is hard-locked to that single
+    // OpenRouter sub-channel:
+    //   • provider.only        = [<canonical slug>]
+    //   • provider.allow_fallbacks = false
+    //   • provider.order       = [<canonical slug>]   (for log clarity)
+    // Any client-supplied `only`/`allow_fallbacks` is overwritten so callers
+    // cannot escape the lock.  See ROUTING_AUDIT.md §5.
+    //
+    // For ids without a routing prefix we fall back to the historical default
+    // — pin `anthropic/...` ids to amazon-bedrock so high-volume Claude
+    // traffic keeps the Bedrock cache benefits.
     {
-      const isORClaude = model.toLowerCase().startsWith("anthropic/");
-      if (isORClaude && !b["provider"]) {
-        b["provider"] = { order: ["amazon-bedrock"], allow_fallbacks: false };
+      const route = detectAbsoluteProviderRoute(model);
+      if (route) {
+        b["provider"] = buildAbsoluteProviderBlock(route, b["provider"]);
+      } else {
+        const isORClaude = model.toLowerCase().startsWith("anthropic/");
+        if (isORClaude && !b["provider"]) {
+          b["provider"] = { order: ["amazon-bedrock"], allow_fallbacks: false };
+        }
       }
     }
 

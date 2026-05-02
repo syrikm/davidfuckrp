@@ -166,15 +166,31 @@ function buildReasoning(ir: GatewayRequestIR): Record<string, unknown> | undefin
 }
 
 function buildProvider(ir: GatewayRequestIR): Record<string, unknown> | undefined {
-  if (!ir.provider) return undefined;
+  // Absolute-routing override: when a model prefix declared a provider
+  // lock (e.g. `bedrock/...`), force `only` + `allow_fallbacks: false`
+  // unconditionally on the outgoing body — even if `ir.provider` was
+  // somehow cleared between normalization and serialization.  This is the
+  // last line of defence before the payload reaches the sub-node, so it
+  // must be self-sufficient.
+  const route = ir.modelResolution?.providerRoute;
+
+  if (!ir.provider && !route) return undefined;
 
   const provider: Record<string, unknown> = {};
-  if (ir.provider.order?.length) provider.order = ir.provider.order;
-  if (ir.provider.only?.length) provider.only = ir.provider.only;
-  if (typeof ir.provider.allowFallbacks === "boolean") provider.allow_fallbacks = ir.provider.allowFallbacks;
-  if (ir.provider.sort) provider.sort = ir.provider.sort;
 
-  return Object.keys(provider).length > 0 ? provider : ir.provider.raw;
+  if (ir.provider?.order?.length) provider.order = ir.provider.order;
+  if (ir.provider?.only?.length) provider.only = ir.provider.only;
+  if (typeof ir.provider?.allowFallbacks === "boolean") provider.allow_fallbacks = ir.provider.allowFallbacks;
+  if (ir.provider?.sort) provider.sort = ir.provider.sort;
+
+  if (route) {
+    if (route.order?.length) provider.order = [...route.order];
+    if (route.only?.length) provider.only = [...route.only];
+    provider.allow_fallbacks = false;
+  }
+
+  if (Object.keys(provider).length > 0) return provider;
+  return ir.provider?.raw;
 }
 
 function buildCacheControl(ir: GatewayRequestIR): Record<string, unknown> | undefined {

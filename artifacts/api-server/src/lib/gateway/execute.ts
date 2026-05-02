@@ -10,6 +10,7 @@ import {
 import { hashRequest } from "../responseCache";
 import {
   buildBackendPool,
+  filterBackendPoolByProvider,
   getDynamicBackendsSnapshot,
   loadDynamicBackends,
   type BackendPoolEntry,
@@ -120,12 +121,16 @@ function buildCacheFingerprint(model: string, messages: GatewayBridgeMessage[]):
   return fp;
 }
 
-function pickBackendForCache(fingerprint: string): FriendBackend | null {
+function pickBackendForCache(
+  fingerprint: string,
+  providerSlug?: string,
+): { backend: FriendBackend | null; poolSize: number; eligibleSize: number } {
   const pool = buildBackendPool(getDynamicBackendsSnapshot());
+  const eligible = providerSlug ? filterBackendPoolByProvider(pool, providerSlug) : pool;
   let best: FriendBackend | null = null;
   let bestScore = -1;
 
-  for (const backend of pool) {
+  for (const backend of eligible) {
     const score = fnv1aHash(`${fingerprint}|${backend.url}`);
     if (score > bestScore) {
       best = backend;
@@ -133,7 +138,7 @@ function pickBackendForCache(fingerprint: string): FriendBackend | null {
     }
   }
 
-  return best;
+  return { backend: best, poolSize: pool.length, eligibleSize: eligible.length };
 }
 
 function setSseHeaders(res: Response): void {
@@ -1872,9 +1877,34 @@ async function forwardAnthropicCompat(
 export async function executeGatewayRequest(options: GatewayExecuteOptions): Promise<void> {
   const { req, res, request, debug } = options;
   const fingerprint = buildCacheFingerprint(request.model, request.messages);
-  const backend = pickBackendForCache(fingerprint);
+  const lockedProviderSlug = request.providerRoute?.provider;
+  const { backend, poolSize, eligibleSize } = pickBackendForCache(fingerprint, lockedProviderSlug);
 
   if (!backend) {
+    // No eligible sub-node.  Distinguish two failure modes so callers can
+    // diagnose: (a) pool empty entirely → 503; (b) pool non-empty but no
+    // node reports support for the locked provider → 422 (request can't be
+    // satisfied without violating the absolute-routing contract).
+    if (lockedProviderSlug && poolSize > 0 && eligibleSize === 0) {
+      req.log.warn({
+        providerPrefix: request.providerRoute?.prefix,
+        providerSlug: lockedProviderSlug,
+        poolSize,
+      }, "Absolute routing: no sub-node reports capability for locked provider");
+      res.status(422).json({
+        error: {
+          message:
+            `No registered sub-node can serve provider "${lockedProviderSlug}" ` +
+            `(model "${request.model}" hard-locks to it via prefix "${request.providerRoute?.prefix}"). ` +
+            `Add a sub-node whose OpenRouter account has access to this provider, ` +
+            `or remove the routing prefix to allow OpenRouter's default selection.`,
+          type: "provider_capability_missing",
+          providerPrefix: request.providerRoute?.prefix,
+          providerSlug: lockedProviderSlug,
+        },
+      });
+      return;
+    }
     res.status(503).json({
       error: {
         message: "No available sub-nodes for unified gateway",
@@ -1886,6 +1916,13 @@ export async function executeGatewayRequest(options: GatewayExecuteOptions): Pro
 
   if (!res.headersSent) {
     res.setHeader("X-Gateway-Backend", backend.label);
+    if (lockedProviderSlug) {
+      res.setHeader("X-Gateway-Locked-Provider", lockedProviderSlug);
+      res.setHeader("X-Gateway-Allow-Fallbacks", "false");
+      if (request.providerRoute?.prefix) {
+        res.setHeader("X-Gateway-Provider-Prefix", request.providerRoute.prefix);
+      }
+    }
     res.setHeader("X-Gateway-Cache-Affinity", "rendezvous");
     res.setHeader("X-Gateway-Upstream-Task-TTL-Ms", String(GATEWAY_EXECUTION_TIMEOUTS.upstreamLongPollMs));
     res.setHeader("X-Gateway-Stream-Reconnect-Window-Ms", String(GATEWAY_EXECUTION_TIMEOUTS.subNodeStreamWallMs));

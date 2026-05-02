@@ -8,70 +8,327 @@ import type {
 
 interface GatewayProviderPrefixSpec {
   aliases: string[];
+  /** Canonical OpenRouter provider slug to lock the request to.
+   *  When omitted (e.g. for the "openrouter" pass-through prefix), no
+   *  provider.only / allow_fallbacks restriction is applied. */
   provider?: string;
   order?: string[];
   only?: string[];
+  /** When provider is set this is forced to false (absolute routing).
+   *  When provider is undefined this field is ignored. */
   allowFallbacks?: boolean;
 }
 
 /**
- * Master list of recognized model-id prefixes.
+ * Absolute provider routing table.
  *
- * Two kinds of prefixes coexist here:
+ * Each entry maps one or more incoming model-prefix aliases to a single
+ * canonical OpenRouter provider slug.  When a request arrives with a model
+ * id like `bedrock/claude-sonnet-4.5`, the gateway:
+ *   1. detects the `bedrock` prefix here
+ *   2. strips the prefix from the model id forwarded to OpenRouter
+ *   3. injects `provider: { only: ["amazon-bedrock"], allow_fallbacks: false }`
+ *      into the upstream body
+ *   4. refuses any client attempt to override `only` or set
+ *      `allow_fallbacks: true`
  *
- * 1. **Provider locks** (have `provider` field) — when the user writes
- *    `<prefix>/<model>`, the gateway will force OpenRouter to route the
- *    request to that exact provider via `provider.only` + `allow_fallbacks:false`.
+ * Slugs follow OpenRouter's documented provider list
+ * (https://openrouter.ai/docs/features/provider-routing).
  *
- * 2. **Vendor-only prefixes** (no `provider` field) — these are model-id
- *    namespaces like `meta-llama/`, `qwen/`, `amazon/` that can be hosted
- *    by multiple OpenRouter providers. They are stripped during canonicalization
- *    but produce no provider lock.
+ * Two kinds of entries coexist:
  *
- * The `openrouter/` prefix is special: it indicates the inner segment is a
- * full OpenRouter model id (`openrouter/<vendor>/<model>` or `openrouter/<lock-prefix>/<vendor>/<model>`),
- * and we recurse into the inner segment to detect any nested lock prefix.
+ * 1. **Provider locks** (have `provider` field) — force `provider.only` +
+ *    `allow_fallbacks:false`.
+ * 2. **Vendor-only namespaces** (no `provider` field) — recognised so the
+ *    prefix is stripped during canonicalisation, but no lock is injected.
+ *    Used for model ids like `meta-llama/llama-3.3` and `qwen/qwen-2.5`
+ *    that can be served by multiple OpenRouter providers.
+ *
+ * The `openrouter/` and `auto/` prefixes are explicit pass-through entries:
+ * they consume the prefix (so it's stripped from the forwarded model id)
+ * but inject no `only` / `allow_fallbacks` fields. `openrouter/<inner>/...`
+ * additionally recurses so a nested lock prefix is honoured.
  */
 const PROVIDER_PREFIX_SPECS: GatewayProviderPrefixSpec[] = [
-  // —— OpenRouter sub-channel locks ——
-  { aliases: ["bedrock", "amazon-bedrock"], provider: "amazon-bedrock", order: ["amazon-bedrock"], only: ["amazon-bedrock"], allowFallbacks: false },
-  { aliases: ["vertex", "google-vertex"], provider: "google-vertex", order: ["google-vertex"], only: ["google-vertex"], allowFallbacks: false },
-  { aliases: ["google-ai-studio", "ai-studio"], provider: "google-ai-studio", order: ["google-ai-studio"], only: ["google-ai-studio"], allowFallbacks: false },
-  // `google` is kept as a Vertex alias for backward compatibility.
-  { aliases: ["google"], provider: "google-vertex", order: ["google-vertex"], only: ["google-vertex"], allowFallbacks: false },
-  { aliases: ["anthropic"], provider: "anthropic", order: ["anthropic"], only: ["anthropic"], allowFallbacks: false },
-  { aliases: ["openai"], provider: "openai", order: ["openai"], only: ["openai"], allowFallbacks: false },
-  { aliases: ["azure"], provider: "azure", order: ["azure"], only: ["azure"], allowFallbacks: false },
-  { aliases: ["x-ai", "xai"], provider: "x-ai", order: ["x-ai"], only: ["x-ai"], allowFallbacks: false },
-  { aliases: ["groq"], provider: "groq", order: ["groq"], only: ["groq"], allowFallbacks: false },
-  { aliases: ["cerebras"], provider: "cerebras", order: ["cerebras"], only: ["cerebras"], allowFallbacks: false },
-  { aliases: ["fireworks"], provider: "fireworks", order: ["fireworks"], only: ["fireworks"], allowFallbacks: false },
-  { aliases: ["together"], provider: "together", order: ["together"], only: ["together"], allowFallbacks: false },
-  { aliases: ["deepinfra"], provider: "deepinfra", order: ["deepinfra"], only: ["deepinfra"], allowFallbacks: false },
-  { aliases: ["nebius"], provider: "nebius", order: ["nebius"], only: ["nebius"], allowFallbacks: false },
-  { aliases: ["novita", "novitaai"], provider: "novita", order: ["novita"], only: ["novita"], allowFallbacks: false },
-  { aliases: ["mistral"], provider: "mistral", order: ["mistral"], only: ["mistral"], allowFallbacks: false },
-  { aliases: ["cohere"], provider: "cohere", order: ["cohere"], only: ["cohere"], allowFallbacks: false },
-  { aliases: ["perplexity"], provider: "perplexity", order: ["perplexity"], only: ["perplexity"], allowFallbacks: false },
-  { aliases: ["deepseek"], provider: "deepseek", order: ["deepseek"], only: ["deepseek"], allowFallbacks: false },
-  { aliases: ["moonshot", "moonshotai"], provider: "moonshot", order: ["moonshot"], only: ["moonshot"], allowFallbacks: false },
-  { aliases: ["sambanova"], provider: "sambanova", order: ["sambanova"], only: ["sambanova"], allowFallbacks: false },
-  { aliases: ["nvidia"], provider: "nvidia", order: ["nvidia"], only: ["nvidia"], allowFallbacks: false },
-  { aliases: ["cloudflare"], provider: "cloudflare", order: ["cloudflare"], only: ["cloudflare"], allowFallbacks: false },
-  { aliases: ["chutes"], provider: "chutes", order: ["chutes"], only: ["chutes"], allowFallbacks: false },
-  { aliases: ["parasail"], provider: "parasail", order: ["parasail"], only: ["parasail"], allowFallbacks: false },
-  { aliases: ["minimax"], provider: "minimax", order: ["minimax"], only: ["minimax"], allowFallbacks: false },
-  { aliases: ["alibaba", "alibaba-cloud"], provider: "alibaba", order: ["alibaba"], only: ["alibaba"], allowFallbacks: false },
-  { aliases: ["baidu", "baidu-qianfan"], provider: "baidu", order: ["baidu"], only: ["baidu"], allowFallbacks: false },
+  // ── Cloud Anthropic backends ────────────────────────────────────────────
+  {
+    aliases: ["bedrock", "amazon-bedrock"],
+    provider: "amazon-bedrock",
+    order: ["amazon-bedrock"],
+    only: ["amazon-bedrock"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["vertex", "google-vertex", "anthropic-vertex"],
+    provider: "google-vertex",
+    order: ["google-vertex"],
+    only: ["google-vertex"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["anthropic", "anthropic-direct"],
+    provider: "anthropic",
+    order: ["anthropic"],
+    only: ["anthropic"],
+    allowFallbacks: false,
+  },
 
-  // —— Vendor-only prefixes (model-id namespaces, no provider lock) ——
+  // ── Google ──────────────────────────────────────────────────────────────
+  // `aistudio/` → AI Studio Gemini API
+  // `google/`   → Vertex AI Gemini (preserve historical behaviour)
+  {
+    aliases: ["aistudio", "ai-studio", "google-ai-studio"],
+    provider: "google-ai-studio",
+    order: ["google-ai-studio"],
+    only: ["google-ai-studio"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["google"],
+    provider: "google-vertex",
+    order: ["google-vertex"],
+    only: ["google-vertex"],
+    allowFallbacks: false,
+  },
+
+  // ── First-party ─────────────────────────────────────────────────────────
+  {
+    aliases: ["openai", "openai-direct"],
+    provider: "openai",
+    order: ["openai"],
+    only: ["openai"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["x-ai", "xai"],
+    provider: "x-ai",
+    order: ["x-ai"],
+    only: ["x-ai"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["deepseek", "deepseek-direct"],
+    provider: "deepseek",
+    order: ["deepseek"],
+    only: ["deepseek"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["mistral", "mistralai"],
+    provider: "mistral",
+    order: ["mistral"],
+    only: ["mistral"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["cohere"],
+    provider: "cohere",
+    order: ["cohere"],
+    only: ["cohere"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["perplexity"],
+    provider: "perplexity",
+    order: ["perplexity"],
+    only: ["perplexity"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["moonshotai", "moonshot"],
+    provider: "moonshotai",
+    order: ["moonshotai"],
+    only: ["moonshotai"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["z-ai", "zai"],
+    provider: "z-ai",
+    order: ["z-ai"],
+    only: ["z-ai"],
+    allowFallbacks: false,
+  },
+
+  // ── Fast-inference partner clouds ───────────────────────────────────────
+  {
+    aliases: ["groq"],
+    provider: "groq",
+    order: ["groq"],
+    only: ["groq"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["cerebras"],
+    provider: "cerebras",
+    order: ["cerebras"],
+    only: ["cerebras"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["sambanova"],
+    provider: "sambanova",
+    order: ["sambanova"],
+    only: ["sambanova"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["fireworks", "fireworks-ai"],
+    provider: "fireworks",
+    order: ["fireworks"],
+    only: ["fireworks"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["together", "togetherai"],
+    provider: "together",
+    order: ["together"],
+    only: ["together"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["deepinfra"],
+    provider: "deepinfra",
+    order: ["deepinfra"],
+    only: ["deepinfra"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["novita", "novitaai"],
+    provider: "novita",
+    order: ["novita"],
+    only: ["novita"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["hyperbolic"],
+    provider: "hyperbolic",
+    order: ["hyperbolic"],
+    only: ["hyperbolic"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["lambda"],
+    provider: "lambda",
+    order: ["lambda"],
+    only: ["lambda"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["cloudflare"],
+    provider: "cloudflare",
+    order: ["cloudflare"],
+    only: ["cloudflare"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["friendli"],
+    provider: "friendli",
+    order: ["friendli"],
+    only: ["friendli"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["featherless"],
+    provider: "featherless",
+    order: ["featherless"],
+    only: ["featherless"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["mancer"],
+    provider: "mancer",
+    order: ["mancer"],
+    only: ["mancer"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["parasail"],
+    provider: "parasail",
+    order: ["parasail"],
+    only: ["parasail"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["baseten"],
+    provider: "baseten",
+    order: ["baseten"],
+    only: ["baseten"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["replicate"],
+    provider: "replicate",
+    order: ["replicate"],
+    only: ["replicate"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["nebius"],
+    provider: "nebius",
+    order: ["nebius"],
+    only: ["nebius"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["chutes"],
+    provider: "chutes",
+    order: ["chutes"],
+    only: ["chutes"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["azure", "azure-openai"],
+    provider: "azure",
+    order: ["azure"],
+    only: ["azure"],
+    allowFallbacks: false,
+  },
+
+  // ── Additional locks (parallel HEAD branch) ─────────────────────────────
+  // These slugs were added on the parallel feature branch (fdc0209) and
+  // are merged in here so absolute routing covers them too.
+  {
+    aliases: ["nvidia"],
+    provider: "nvidia",
+    order: ["nvidia"],
+    only: ["nvidia"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["minimax"],
+    provider: "minimax",
+    order: ["minimax"],
+    only: ["minimax"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["alibaba", "alibaba-cloud"],
+    provider: "alibaba",
+    order: ["alibaba"],
+    only: ["alibaba"],
+    allowFallbacks: false,
+  },
+  {
+    aliases: ["baidu", "baidu-qianfan"],
+    provider: "baidu",
+    order: ["baidu"],
+    only: ["baidu"],
+    allowFallbacks: false,
+  },
+
+  // ── Vendor-only namespaces (no provider lock) ───────────────────────────
+  // Stripped during canonicalisation but no `provider.only` is injected,
+  // since these vendors are hosted by multiple OpenRouter sub-channels.
   { aliases: ["meta-llama", "meta", "llama"] },
-  { aliases: ["mistralai"] },
   { aliases: ["qwen"] },
   { aliases: ["amazon"] },
 
-  // —— OpenRouter pass-through (caller will recurse into the inner prefix) ——
-  { aliases: ["openrouter"] },
+  // ── Pass-through ────────────────────────────────────────────────────────
+  // No provider field → no lock.  The model id (with the prefix stripped)
+  // is forwarded to OpenRouter and OpenRouter is free to pick.
+  {
+    aliases: ["openrouter", "auto"],
+  },
 ];
 
 const KNOWN_VENDOR_PREFIXES: Set<string> = new Set(
@@ -196,6 +453,29 @@ function findProviderPrefixSpec(prefix: string): GatewayProviderPrefixSpec | und
   return PROVIDER_PREFIX_SPECS.find((spec) => spec.aliases.includes(normalizedPrefix));
 }
 
+/** Public: list of every accepted absolute-routing prefix alias.
+ *  Consumed by the legacy /v1/chat/completions and /v1/messages routes
+ *  so they share a single source of truth with the unified gateway. */
+export function listAbsoluteProviderPrefixAliases(): string[] {
+  const aliases = new Set<string>();
+  for (const spec of PROVIDER_PREFIX_SPECS) {
+    for (const alias of spec.aliases) aliases.add(alias.toLowerCase());
+  }
+  return Array.from(aliases);
+}
+
+/** Public: detect an absolute-routing prefix on a model id and return the
+ *  resolved route.  Returns undefined when no prefix matches or when the
+ *  matching prefix is a pass-through alias (no `provider` lock). */
+export function detectAbsoluteProviderRoute(model: string): GatewayProviderRoute | undefined {
+  const normalized = normalizePath(model);
+  if (!normalized) return undefined;
+  const segments = normalized.split("/");
+  if (segments.length < 2) return undefined;
+  const prefix = segments[0]?.toLowerCase() ?? "";
+  return buildProviderRoute(prefix);
+}
+
 function buildProviderRoute(prefix: string): GatewayProviderRoute | undefined {
   const spec = findProviderPrefixSpec(prefix);
   if (!spec?.provider) return undefined;
@@ -205,7 +485,9 @@ function buildProviderRoute(prefix: string): GatewayProviderRoute | undefined {
     provider: spec.provider,
     order: spec.order ? [...spec.order] : undefined,
     only: spec.only ? [...spec.only] : undefined,
-    allowFallbacks: spec.allowFallbacks,
+    // Absolute routing — `allow_fallbacks: false` is non-negotiable here
+    // even if the spec entry forgets to set it.  See ROUTING_AUDIT.md §1.
+    allowFallbacks: false,
     source: "model-prefix",
   };
 }
@@ -367,19 +649,24 @@ export function resolveGatewayModelRoute(model: string): GatewayModelResolution 
 }
 
 /**
- * Merge request-supplied `provider` config with the model-prefix-derived route.
+ * Merge a request-supplied `provider` block with the prefix-derived route.
  *
- * Absolute-routing contract (see `docs/vendors/ROUTING_AUDIT.md`):
- *   When the model id carries a recognized lock prefix, the prefix wins:
- *     - `allowFallbacks` is forced to `false` regardless of what the client sent.
- *     - `only` is the **intersection** of the prefix `only` and any client-supplied
- *       `only`. If the client's `only` excludes the prefix's provider entirely,
- *       we still emit the prefix's `only` (the prefix is authoritative); the
- *       client's incompatible value is preserved in `raw` for audit.
- *     - `order` falls back to the prefix order if the client did not supply one.
+ * **Absolute-routing contract** (see `docs/vendors/ROUTING_AUDIT.md`) —
+ * when the prefix declares a provider lock, the lock is non-overridable:
+ *   • `only` is FORCE-set to the route's `only`.  Any client `only` is
+ *     discarded so a client cannot widen the allow-list.
+ *   • `allow_fallbacks` is FORCE-set to `false`.  Any client `true` is
+ *     discarded so a client cannot opt out of the lock.
+ *   • `order` is FORCE-set to the route's `order` for stable observability.
  *
- * Anything not constrained by the prefix (e.g. `sort`, `data_collection`,
- * extra fields the client passed) is preserved as-is from the request.
+ * Other request fields (`sort`, `raw`, custom keys) are preserved so the
+ * client can still e.g. ask for `sort: "throughput"` within the locked
+ * provider's variants.
+ *
+ * NB: an earlier implementation tried to take the **intersection** of the
+ * client's `only` and the prefix's `only`.  That is unsafe — a malicious
+ * or misconfigured client can supply `only: []` and effectively widen the
+ * lock to "any provider".  Force-overwrite is the only correct choice.
  */
 export function mergeGatewayProviderConfig(
   requestProvider: GatewayProviderConfig | undefined,
@@ -393,31 +680,23 @@ export function mergeGatewayProviderConfig(
   };
 
   if (route) {
-    // Absolute lock from prefix — prefix always wins.
-    if (route.only?.length) {
-      const requestOnly = requestProvider?.only ?? [];
-      if (requestOnly.length === 0) {
-        merged.only = [...route.only];
-      } else {
-        const intersection = requestOnly.filter((slug) => route.only!.includes(slug));
-        // If client's `only` is compatible with the prefix lock, keep the
-        // intersection; otherwise the prefix wins outright.
-        merged.only = intersection.length > 0 ? intersection : [...route.only];
-      }
-    }
-
-    if (!merged.order?.length && route.order?.length) {
-      merged.order = [...route.order];
-    }
-
-    // Forced — clients cannot relax fallbacks under a lock prefix.
-    if (route.allowFallbacks === false) {
-      merged.allowFallbacks = false;
-    } else if (typeof merged.allowFallbacks !== "boolean" && typeof route.allowFallbacks === "boolean") {
-      merged.allowFallbacks = route.allowFallbacks;
-    }
-
+    // Absolute routing — force-overwrite the lock fields.  Any client-supplied
+    // `only` / `order` / `allow_fallbacks` is discarded; client cannot escape.
+    if (route.order?.length) merged.order = [...route.order];
+    if (route.only?.length) merged.only = [...route.only];
+    merged.allowFallbacks = false;
     merged.routeLabel = route.provider;
+  } else {
+    // No prefix lock — fall back to the request's own preferences.
+    if (!merged.order?.length && requestProvider?.order?.length) {
+      merged.order = [...requestProvider.order];
+    }
+    if (!merged.only?.length && requestProvider?.only?.length) {
+      merged.only = [...requestProvider.only];
+    }
+    if (typeof merged.allowFallbacks !== "boolean" && typeof requestProvider?.allowFallbacks === "boolean") {
+      merged.allowFallbacks = requestProvider.allowFallbacks;
+    }
   }
 
   merged.source = requestProvider
@@ -426,8 +705,17 @@ export function mergeGatewayProviderConfig(
 
   if (requestProvider?.raw || route) {
     merged.raw = {
-      ...(route ? { provider_route: route.provider, provider_prefix: route.prefix } : {}),
       ...(requestProvider?.raw ?? {}),
+      ...(route
+        ? {
+            // Surface the lock in the raw block so downstream observability
+            // can see the absolute routing contract was applied.
+            provider_route: route.provider,
+            provider_prefix: route.prefix,
+            allow_fallbacks: false,
+            only: route.only ? [...route.only] : undefined,
+          }
+        : {}),
     };
   }
 

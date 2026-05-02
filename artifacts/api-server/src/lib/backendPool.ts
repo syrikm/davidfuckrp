@@ -74,6 +74,21 @@ export interface BackendPoolEntry {
   nodeId?: string;
   version?: string;
   capabilities?: string[];
+  /**
+   * Set of OpenRouter provider slugs this sub-node's OpenRouter account is
+   * known to be able to reach.  Derived from `reportedModels[*].provider` /
+   * `provider_family` at pool-build time.
+   *
+   * Semantics for absolute-routing capability checks:
+   *   • undefined  → "unknown" — we have no reporting from this node, treat
+   *     as capable of serving any locked provider (legacy compatibility for
+   *     env-only / dynamic backends that never reported a model list).
+   *   • []         → "explicitly empty" — the node reported zero models;
+   *     treat as capable too (assume it just hasn't synced yet).
+   *   • [slug, …]  → only the listed slugs are known-good; any other locked
+   *     slug is filtered out.
+   */
+  providerSlugs?: string[];
 }
 
 /** Virtual local backend — routes to Replit AI Integrations directly. */
@@ -400,6 +415,59 @@ export function refreshHealthAsync(dynamicBackends: DynamicBackend[] = getDynami
   }
 }
 
+function extractProviderSlugsFromConfig(config: BackendConfig): string[] | undefined {
+  const reported = config.reportedModels;
+  if (!Array.isArray(reported)) return undefined;
+  if (reported.length === 0) return [];
+  const set = new Set<string>();
+  for (const model of reported) {
+    if (typeof model.provider === "string" && model.provider.trim()) {
+      set.add(model.provider.trim().toLowerCase());
+    }
+    if (typeof model.provider_family === "string" && model.provider_family.trim()) {
+      set.add(model.provider_family.trim().toLowerCase());
+    }
+    const id = typeof model.id === "string" ? model.id.trim() : "";
+    if (id.includes("/")) {
+      const head = id.split("/", 1)[0]?.trim().toLowerCase();
+      if (head) set.add(head);
+    }
+    const canonical = typeof model.canonical_id === "string" ? model.canonical_id.trim() : "";
+    if (canonical.includes("/")) {
+      const head = canonical.split("/", 1)[0]?.trim().toLowerCase();
+      if (head) set.add(head);
+    }
+  }
+  return Array.from(set);
+}
+
+/**
+ * Decide whether a backend pool entry can serve a request that has been
+ * hard-locked to a specific OpenRouter provider slug.  See the JSDoc on
+ * BackendPoolEntry.providerSlugs for the precise semantics.
+ */
+export function backendCanServeProvider(
+  entry: { providerSlugs?: string[] },
+  providerSlug: string,
+): boolean {
+  const slugs = entry.providerSlugs;
+  if (!Array.isArray(slugs)) return true; // unknown → assume capable
+  if (slugs.length === 0) return true;     // explicitly empty → assume capable
+  const target = providerSlug.trim().toLowerCase();
+  return slugs.includes(target);
+}
+
+/**
+ * Filter a backend pool to those entries known to be able to serve the
+ * given OpenRouter provider slug.  Pure: returns a new array.
+ */
+export function filterBackendPoolByProvider<T extends { providerSlugs?: string[] }>(
+  pool: T[],
+  providerSlug: string,
+): T[] {
+  return pool.filter((entry) => backendCanServeProvider(entry, providerSlug));
+}
+
 export function buildBackendPool(dynamicBackends: DynamicBackend[] = getDynamicBackendsSnapshot()): BackendPoolEntry[] {
   const configs = getFriendProxyConfigs(dynamicBackends).filter((config) => config.enabled);
   const primary: BackendPoolEntry[] = [];
@@ -418,6 +486,7 @@ export function buildBackendPool(dynamicBackends: DynamicBackend[] = getDynamicB
       nodeId: config.nodeId,
       version: config.version,
       capabilities: config.capabilities,
+      providerSlugs: extractProviderSlugsFromConfig(config),
     };
     if (healthy !== false) primary.push(backend);
     else lastResort.push(backend);

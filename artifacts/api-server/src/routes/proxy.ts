@@ -7091,4 +7091,53 @@ router.all(/^\/v1\/(?!admin|jobs)/, requireApiKey, async (req: Request, res: Res
 // Local AI SDK calls are banned at the architecture level.
 // ---------------------------------------------------------------------------
 
+// TEMP DIAG — REMOVE AFTER DEBUG
+router.post("/__diag/or-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_OPENROUTER_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+  if (!key) { res.status(500).json({ error: "no OR key" }); return; }
+  const r = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(req.body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, json: json ?? text });
+});
+router.post("/__diag/anthropic-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com/v1";
+  if (!key) { res.status(500).json({ error: "no anthropic key" }); return; }
+  const r = await fetch(`${base}/messages`, {
+    method: "POST",
+    headers: {
+      "x-api-key": key,
+      Authorization: `Bearer ${key}`,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(req.body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, json: json ?? text });
+});
+router.post("/__diag/gemini-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"] ?? "https://generativelanguage.googleapis.com/v1beta";
+  if (!key) { res.status(500).json({ error: "no gemini key" }); return; }
+  const model = (req.body && typeof req.body === "object" && (req.body as Record<string, unknown>)["model"]) || "gemini-2.0-flash";
+  const body = { ...(req.body as Record<string, unknown>) };
+  delete body["model"];
+  const r = await fetch(`${base}/models/${String(model)}:generateContent?key=${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, model, json: json ?? text });
+});
+
 export default router;

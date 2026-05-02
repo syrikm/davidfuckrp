@@ -1,4 +1,4 @@
-SYNTAX=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7
 # ============================================================================
 # AI Proxy Gateway (mother) — Dockerfile
 #

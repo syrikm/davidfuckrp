@@ -132,4 +132,28 @@ if (r?.entries?.[0]?.label !== 'X') throw new Error('round-trip mismatch');
 console.log('PASS');
 "
 
-echo "=== ALL 8 STORAGE FACTORY ASSERTIONS PASS ==="
+run "concurrent same-key writes serialize via per-key mutex (no ENOENT, last-write-wins) — 5 iterations" "
+delete process.env.DEFAULT_OBJECT_STORAGE_BUCKET_ID;
+process.env.STORAGE_BACKEND='local';
+process.env.STORAGE_LOCAL_DIR='$DATA_TMP/d3';
+const fs = await import('node:fs/promises');
+const m = await import('./.test-tmp/storage-bundle.mjs');
+const a = m.getStorageAdapter();
+const ITER = 5;
+const N = 50;
+for (let it = 0; it < ITER; it++) {
+  const writes = [];
+  for (let i = 0; i < N; i++) writes.push(a.write('contended.json', { it, i }));
+  await Promise.all(writes);
+  const final = await a.read('contended.json');
+  if (final?.i !== N - 1 || final?.it !== it) {
+    throw new Error('last-write-wins broken at iter ' + it + ': got ' + JSON.stringify(final));
+  }
+  const files = await fs.readdir('$DATA_TMP/d3');
+  const stale = files.filter(f => f.includes('.tmp.'));
+  if (stale.length !== 0) throw new Error('stale temp files at iter ' + it + ': ' + stale.join(','));
+}
+console.log('PASS - ' + ITER + 'x' + N + ' concurrent writes serialized, last-write-wins, no stale tmp');
+"
+
+echo "=== ALL 9 STORAGE FACTORY ASSERTIONS PASS ==="

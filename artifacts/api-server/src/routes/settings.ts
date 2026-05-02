@@ -109,13 +109,17 @@ router.post("/settings/sillytavern", async (req: Request, res: Response) => {
     return;
   }
   settings.sillyTavernMode = enabled;
+  // Pass a snapshot so an overlapping POST that mutates `settings` mid-flight
+  // can't bleed into this write (the local adapter's per-key mutex serializes
+  // the rename, but it serializes whatever value was captured here).
+  const snapshot: ServerSettings = { ...settings };
   try {
-    await saveSettings(settings);
+    await saveSettings(snapshot);
   } catch {
     res.status(500).json({ error: { message: "Failed to persist settings", type: "server_error" } });
     return;
   }
-  res.json({ enabled: settings.sillyTavernMode });
+  res.json({ enabled: snapshot.sillyTavernMode });
 });
 
 export default router;

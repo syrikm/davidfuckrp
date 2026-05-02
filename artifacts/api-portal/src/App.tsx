@@ -741,10 +741,6 @@ function PageCluster({
   onBatchRemove,
   routing,
   onToggleRouting,
-  localNodeEnabled,
-  localNodeAvailable,
-  localNodeLoading,
-  onToggleLocalNode,
 }: {
   baseUrl: string;
   apiKey: string;
@@ -763,10 +759,6 @@ function PageCluster({
   routing: { fakeStream: boolean };
   onToggleRouting: (field: "fakeStream", value: boolean) => void;
   modelStats: Record<string, ModelStat> | null;
-  localNodeEnabled: boolean;
-  localNodeAvailable: boolean;
-  localNodeLoading: boolean;
-  onToggleLocalNode: () => void;
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [envPromptCopied, setEnvPromptCopied] = useState(false);
@@ -876,8 +868,8 @@ function PageCluster({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "16px" }}>
             <KpiCard title="总请求" value={String(totals.calls)} sub={`流式 ${totals.streamingCalls} · 错误 ${totals.errors}`} accent="#818cf8" />
             <KpiCard title="Token 汇总" value={fmt(totals.totalTokens)} sub={`输入 ${fmt(totals.promptTokens)} · 输出 ${fmt(totals.completionTokens)}`} accent="#34d399" />
-            <KpiCard title="子节点数量" value={String(allSubNodes.length)} sub={`本地节点 ${localNodeEnabled ? "启用" : "禁用"}`} accent="#f59e0b" />
-            <KpiCard title="预估总开销" value={fmtCost(totals.totalCostUSD)} sub="含本地节点 + 所有子节点" accent="#f472b6" />
+            <KpiCard title="子节点数量" value={String(allSubNodes.length)} sub="所有子节点" accent="#f59e0b" />
+            <KpiCard title="预估总开销" value={fmtCost(totals.totalCostUSD)} sub="所有子节点累计" accent="#f472b6" />
           </div>
 
           <Card style={{ marginBottom: "16px" }}>
@@ -890,66 +882,6 @@ function PageCluster({
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                {/* Local node — always shown first with its own toggle */}
-                {(() => {
-                  const s = stats["local"];
-                  if (!s) return null;
-                  const isEnabled = localNodeEnabled;
-                  const isAvail = localNodeAvailable;
-                  return (
-                    <div
-                      key="local"
-                      style={{
-                        background: isEnabled ? "rgba(34,197,94,0.06)" : "rgba(0,0,0,0.35)",
-                        border: `1px solid ${isEnabled ? "rgba(34,197,94,0.2)" : "rgba(248,113,113,0.15)"}`,
-                        borderRadius: "10px",
-                        padding: "14px 16px",
-                        opacity: isEnabled ? 1 : 0.7,
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px", flexWrap: "wrap" }}>
-                        <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: isEnabled && isAvail ? "#4ade80" : isEnabled ? "#f59e0b" : "#64748b" }} />
-                        <span style={{ fontSize: "13px", fontWeight: 700, color: isEnabled ? "#e2e8f0" : "#64748b", fontFamily: "'JetBrains Mono', Menlo, monospace" }}>
-                          本地节点 (local)
-                        </span>
-                        <span style={{ fontSize: "10px", color: "#818cf8", background: "rgba(129,140,248,0.12)", border: "1px solid rgba(129,140,248,0.25)", borderRadius: "4px", padding: "1px 6px" }}>母节点</span>
-                        {!isEnabled && <span style={{ fontSize: "10px", color: "#f87171", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: "4px", padding: "1px 6px" }}>已禁用</span>}
-                        {isEnabled && !isAvail && <span style={{ fontSize: "10px", color: "#f59e0b", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: "4px", padding: "1px 6px" }}>无 AI Integrations</span>}
-                        <span style={{ fontSize: "11px", color: "#334155", fontFamily: "Menlo, monospace" }}>Replit AI Integrations (本机)</span>
-                        <button
-                          onClick={onToggleLocalNode}
-                          disabled={localNodeLoading || !apiKey}
-                          title={isEnabled ? "点击禁用本地节点" : "点击启用本地节点"}
-                          style={{
-                            marginLeft: "auto",
-                            width: "40px", height: "22px", borderRadius: "11px", border: "none",
-                            background: isEnabled ? "#22c55e" : "rgba(255,255,255,0.12)",
-                            cursor: (localNodeLoading || !apiKey) ? "not-allowed" : "pointer",
-                            position: "relative", transition: "background 0.2s", flexShrink: 0,
-                            opacity: (localNodeLoading || !apiKey) ? 0.5 : 1,
-                          }}
-                        >
-                          <div style={{ width: "16px", height: "16px", borderRadius: "50%", background: "#fff", position: "absolute", top: "3px", left: isEnabled ? "21px" : "3px", transition: "left 0.2s" }} />
-                        </button>
-                      </div>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: "12px" }}>
-                        {[
-                          { label: "请求", value: s.calls.toString(), color: "#818cf8" },
-                          { label: "流式", value: (s.streamingCalls ?? 0).toString(), color: "#3b82f6" },
-                          { label: "错误", value: s.errors.toString(), color: s.errors > 0 ? "#f87171" : "#4ade80" },
-                          { label: "输入 Token", value: fmt(s.promptTokens), color: "#34d399" },
-                          { label: "输出 Token", value: fmt(s.completionTokens), color: "#34d399" },
-                          { label: "预估开销", value: fmtCost(s.totalCostUSD ?? 0), color: "#f472b6" },
-                        ].map((item) => (
-                          <div key={item.label}>
-                            <div style={{ fontSize: "10px", color: "#475569", marginBottom: "2px" }}>{item.label}</div>
-                            <div style={{ fontSize: "14px", fontWeight: 600, color: item.color, fontFamily: "'JetBrains Mono', Menlo, monospace" }}>{item.value}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })()}
                 {/* Friend / sub-nodes */}
                 {Object.entries(stats).filter(([label]) => label !== "local").map(([label, s]) => {
                   const isEnabled = s.enabled !== false;
@@ -1842,9 +1774,6 @@ export default function App() {
   const [online, setOnline] = useState<boolean | null>(null);
   const [sillyTavernMode, setSillyTavernMode] = useState(false);
   const [stLoading, setStLoading] = useState(true);
-  const [localNodeEnabled, setLocalNodeEnabled] = useState(false);
-  const [localNodeAvailable, setLocalNodeAvailable] = useState(false);
-  const [localNodeLoading, setLocalNodeLoading] = useState(true);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("proxy_api_key") ?? "");
   const [showWizard, setShowWizard] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
@@ -1888,36 +1817,6 @@ export default function App() {
     } catch {}
     setStLoading(false);
   }, [baseUrl]);
-
-  const fetchLocalNodeMode = useCallback(async () => {
-    try {
-      const key = localStorage.getItem("proxy_api_key") ?? "";
-      const res = await fetch(`${baseUrl}/api/settings/local-node`, {
-        headers: key ? { Authorization: `Bearer ${key}` } : {},
-      });
-      if (res.ok) {
-        const d = await res.json() as { enabled: boolean; available: boolean };
-        setLocalNodeEnabled(Boolean(d.enabled));
-        setLocalNodeAvailable(Boolean(d.available));
-      }
-    } catch {}
-    setLocalNodeLoading(false);
-  }, [baseUrl]);
-
-  const toggleLocalNode = async () => {
-    const newVal = !localNodeEnabled;
-    setLocalNodeEnabled(newVal);
-    try {
-      const res = await fetch(`${baseUrl}/api/settings/local-node`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-        body: JSON.stringify({ enabled: newVal }),
-      });
-      if (!res.ok) setLocalNodeEnabled(!newVal);
-    } catch {
-      setLocalNodeEnabled(!newVal);
-    }
-  };
 
   const toggleSTMode = async () => {
     const newVal = !sillyTavernMode;
@@ -2074,7 +1973,6 @@ export default function App() {
   useEffect(() => {
     checkHealth();
     fetchSTMode();
-    fetchLocalNodeMode();
     fetchStats(apiKey);
     fetchModels(apiKey);
 
@@ -2085,7 +1983,7 @@ export default function App() {
       clearInterval(iv1);
       clearInterval(iv2);
     };
-  }, [checkHealth, fetchSTMode, fetchLocalNodeMode, fetchStats, fetchModels, apiKey]);
+  }, [checkHealth, fetchSTMode, fetchStats, fetchModels, apiKey]);
 
   useEffect(() => {
     if (sessionStorage.getItem("wizard_dismissed") === "1") return;
@@ -2244,10 +2142,6 @@ export default function App() {
             routing={routing}
             onToggleRouting={toggleRouting}
             modelStats={{}}
-            localNodeEnabled={localNodeEnabled}
-            localNodeAvailable={localNodeAvailable}
-            localNodeLoading={localNodeLoading}
-            onToggleLocalNode={toggleLocalNode}
           />
         )}
 
@@ -2340,86 +2234,6 @@ export default function App() {
                     />
                   </button>
                 </div>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "16px",
-                    marginTop: "14px",
-                    paddingTop: "14px",
-                    borderTop: "1px solid rgba(255,255,255,0.06)",
-                  }}
-                >
-                  <div style={{ flex: 1 }}>
-                    <div
-                      style={{
-                        fontWeight: 600,
-                        color: localNodeEnabled ? "#86efac" : "#94a3b8",
-                        fontSize: "13.5px",
-                        marginBottom: "3px",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "8px",
-                      }}
-                    >
-                      启用本地节点
-                      <span
-                        style={{
-                          fontSize: "10.5px",
-                          fontWeight: 700,
-                          padding: "2px 6px",
-                          borderRadius: "4px",
-                          background: localNodeEnabled ? "rgba(34,197,94,0.18)" : "rgba(148,163,184,0.18)",
-                          color: localNodeEnabled ? "#86efac" : "#94a3b8",
-                          letterSpacing: "0.5px",
-                        }}
-                      >
-                        {localNodeEnabled ? "ON" : "OFF"}
-                      </span>
-                      {localNodeEnabled && !localNodeAvailable && (
-                        <span style={{ fontSize: "10.5px", color: "#fbbf24", fontWeight: 600 }}>
-                          ⚠ AI_INTEGRATIONS 未配置
-                        </span>
-                      )}
-                    </div>
-                    <p style={{ margin: 0, color: "#475569", fontSize: "12.5px", lineHeight: "1.5" }}>
-                      启用后将 Replit AI Integrations（AI_INTEGRATIONS_* 环境变量）作为本地后端节点加入路由池，
-                      与 Friend Proxy 子节点并行使用。需要在 Replit Secrets 中配置至少一个 AI_INTEGRATIONS_*_BASE_URL。
-                    </p>
-                  </div>
-                  <button
-                    onClick={toggleLocalNode}
-                    disabled={localNodeLoading || !apiKey}
-                    title={localNodeEnabled ? "点击禁用本地节点" : "点击启用本地节点"}
-                    style={{
-                      width: "52px",
-                      height: "28px",
-                      borderRadius: "14px",
-                      border: "none",
-                      background: localNodeEnabled ? "#22c55e" : "rgba(255,255,255,0.12)",
-                      cursor: (localNodeLoading || !apiKey) ? "not-allowed" : "pointer",
-                      position: "relative",
-                      transition: "background 0.2s",
-                      flexShrink: 0,
-                      opacity: (localNodeLoading || !apiKey) ? 0.5 : 1,
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: "22px",
-                        height: "22px",
-                        borderRadius: "50%",
-                        background: "#fff",
-                        position: "absolute",
-                        top: "3px",
-                        left: localNodeEnabled ? "27px" : "3px",
-                        transition: "left 0.2s",
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-                      }}
-                    />
-                  </button>
-                </div>
               </div>
             </Card>
 
@@ -2432,7 +2246,7 @@ export default function App() {
         )}
 
         <div style={{ marginTop: "32px", textAlign: "center", color: "#1e293b", fontSize: "12px" }}>
-          Powered by Replit AI Integrations · OpenAI · Anthropic · Gemini · OpenRouter
+          OpenAI · Anthropic · Gemini · OpenRouter
         </div>
       </div>
     </div>

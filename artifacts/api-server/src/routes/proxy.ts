@@ -2545,6 +2545,8 @@ export const statsReady: Promise<void> = (async () => {
       const modelsRaw = (saved as { models?: Record<string, ModelStat> }).models;
 
       for (const [label, raw] of Object.entries(backendsRaw)) {
+        // Stage A migration: drop legacy "local" stats entry — mother no longer has a local backend.
+        if (label === "local") continue;
         if (raw && typeof raw === "object" && "calls" in (raw as unknown as Record<string, unknown>)) {
           const rawBreakdown = (raw as BackendStat).modelBreakdown;
           const modelBreakdown: BackendStat["modelBreakdown"] = {};
@@ -4499,7 +4501,7 @@ router.get("/v1/admin/logs/stream", requireApiKeyWithQuery, (req: Request, res: 
 
 router.get("/v1/stats", requireApiKey, async (_req: Request, res: Response) => {
   const allConfigs = getAllFriendProxyConfigs();
-  const allLabels = ["local", ...allConfigs.map((c) => c.label)];
+  const allLabels = allConfigs.map((c) => c.label);
   const result: Record<string, unknown> = {};
   for (const label of allLabels) {
     const s = getStat(label);
@@ -4581,7 +4583,6 @@ router.delete("/v1/admin/cache", requireApiKey, async (_req: Request, res: Respo
 router.get("/v1/admin/backends", requireApiKey, (_req: Request, res: Response) => {
   const allConfigs = getAllFriendProxyConfigs();
   res.json({
-    local: { url: null, source: "local" },
     env: allConfigs
       .filter((c) => c.source === "env")
       .map((c) => ({

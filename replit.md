@@ -96,14 +96,16 @@
 
 ## 后端路由
 
-**全部流量通过 Friend Proxy 子节点转发，本地 Replit AI SDK 调用已永久禁用。**
+**全部流量通过 Friend Proxy 子节点转发；mother 内已无 LocalNode 概念，无任何上游 AI 厂商凭证依赖。**
 
 | Provider | 路由方式 | 说明 |
 |----------|---------|------|
 | 所有 Provider | `handleFriendProxy()` | 直接 fetch 转发到 Friend Proxy 子节点 |
 
 `Backend` 类型定义为 `{ kind: "friend"; ... }` 单一形式，编译期即杜绝本地调用路径。
-已删除函数：`makeLocalOpenAI / makeLocalAnthropic / makeLocalGemini / makeLocalOpenRouter / handleOpenAI / handleGemini / handleClaude`
+已删除函数：`makeLocalOpenAI / makeLocalAnthropic / makeLocalGemini / makeLocalOpenRouter / handleOpenAI / handleGemini / handleClaude / handleLocalChatCompletion / buildLocalBackend / getLocalRouteForModel / buildFullBackendPool`，已删除接口 `LocalBackendPoolEntry`，已删除 settings 字段 `enableLocalNode` 与对应路由 `/api/settings/local-node`，已删除根 `package.json` 死依赖 `@replit/connectors-sdk`，已删除整个 `lib/integrations-openai-ai-server/` 包。
+
+**脱离 Replit 平台规划 — 阶段 A 已完成（V1.1.9）：** mother 现在 100% 通过 friend proxy 出站，可在任何 Node.js 环境运行；不再依赖 Replit AI Integrations。无 friend proxy 时收到请求将硬返回 HTTP 503 + `error.code: "no_backends_available"`，无静默回退。后续阶段 B-H 处理 Storage 抽象、剩余 Replit 字面量与 GATEWAY_TIMEOUTS 参数化。
 
 ## 绝对路由契约（V1.1.9）
 
@@ -145,12 +147,9 @@
 | 变量 | 说明 |
 |------|------|
 | `PROXY_API_KEY` | 必填，保护代理的访问密钥 |
-| `AI_INTEGRATIONS_OPENAI_API_KEY` / `AI_INTEGRATIONS_OPENAI_BASE_URL` | Replit AI 集成自动注入 |
-| `AI_INTEGRATIONS_ANTHROPIC_API_KEY` / `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` | Replit AI 集成自动注入 |
-| `AI_INTEGRATIONS_GEMINI_API_KEY` / `AI_INTEGRATIONS_GEMINI_BASE_URL` | Replit AI 集成自动注入 |
-| `AI_INTEGRATIONS_OPENROUTER_API_KEY` / `AI_INTEGRATIONS_OPENROUTER_BASE_URL` | Replit AI 集成自动注入 |
 | `UPDATE_CHECK_URL` | 可选，远端 `version.json` URL，用于版本检测 |
-| `FRIEND_PROXY_URL` / `FRIEND_PROXY_URL_2` ... | 可选，Friend Proxy 节点 URL |
+| `FRIEND_PROXY_URL` / `FRIEND_PROXY_URL_2` ... | 可选，Friend Proxy 节点 URL（mother 100% 出站路径） |
+| `AI_INTEGRATIONS_*_BASE_URL` / `AI_INTEGRATIONS_*_API_KEY` | **仅 sub-node（friend proxy）使用**；mother 不再读这些变量做出站，但 sub-node 在向 mother 注册时仍通过 `computeChildIntegrationsAllReady()` 读取这些变量自报状态 |
 
 ## 版本
 

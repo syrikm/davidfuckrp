@@ -90,7 +90,34 @@ if (typeof merged.allowFallbacks !== "boolean" && typeof route?.allowFallbacks =
 
 - `buildOpenRouterRequest` 把 `allowFallbacks` → `allow_fallbacks` 命名转换正确（`openrouter.ts:174`）。
 - `provider.only` / `order` / `sort` 字段拼装方向正确（`openrouter.ts:170-178`）。
-- Claude 型号的小数点规范化（`canonicalizeLogicalModel`）符合 OpenRouter `anthropic/claude-sonnet-4.5` 的规范命名。
+- ~~Claude 型号的小数点规范化（`canonicalizeLogicalModel`）符合 OpenRouter `anthropic/claude-sonnet-4.5` 的规范命名。~~ **更正：见下方 Bug #6**——此前结论只在 4.x 单一命名顺序下成立，且漏掉日期/版本后缀剥离。
+
+### ❌ Bug #6 — `canonicalizeLogicalModel` 对 Anthropic 模型 ID 的规范化不完整且无架构注释
+
+文件：`artifacts/api-server/src/lib/gateway/provider.ts`（已修）
+
+**问题（基于文档对照）**：
+
+| 输入（Anthropic / Vertex / Bedrock 官方写法） | 旧实现输出 | 应输出（OpenRouter ID） |
+|----------------------------------------------|----------|-----------------------|
+| `claude-sonnet-4-5` (Anthropic API alias) | `claude-sonnet-4.5` ✅ | `claude-sonnet-4.5` |
+| `claude-sonnet-4-5-20250929` (Anthropic / Bedrock 日期) | `claude-sonnet-4.5-20250929` ❌ | `claude-sonnet-4.5` |
+| `claude-haiku-4-5@20251001` (Vertex) | `claude-haiku-4.5@20251001` ❌ | `claude-haiku-4.5` |
+| `anthropic.claude-sonnet-4-5-20250929-v1:0` (Bedrock) | 原样透传 ❌ | （需先剥 vendor 段）`claude-sonnet-4.5` |
+| `claude-3-5-sonnet` (Anthropic 3.x dash) | 原样透传 ❌ | `claude-3.5-sonnet` |
+| `claude-3-7-sonnet@20250219` (Vertex 3.x) | 原样透传 ❌ | `claude-3.7-sonnet` |
+
+**根因**：旧正则 `^(claude-(?:opus|sonnet|haiku)-)(\d+)[._-](\d+)(.*)$` 假设 sonnet/opus/haiku 在数字之前（4.x 命名顺序），但 3.x 系列是反过来的（`claude-3.7-sonnet`）。同时**完全没有**剥离日期/版本后缀的逻辑。
+
+**架构耦合隐患**：该函数被 `normalize.ts` 入口、`/v1/messages` 入口和 `inferVendorModelPath` 三处共用，把所有 Claude ID 都变成 OpenRouter 的 dot 形式。**这只在"出站走 OpenRouter"的当前架构下正确**——若未来恢复 Anthropic / Vertex / Bedrock 直连，dot 形式会被上游 4xx 拒绝。代码里**没有任何注释**提醒这个假设。
+
+**修法**：
+1. Step 1：先剥日期/版本后缀（`@YYYYMMDD`、`-YYYYMMDD`、`-vN(:N)?`）
+2. Step 2：保留 4.x 形态正则（`claude-{name}-X-Y`）
+3. Step 3：新增 3.x 形态正则（`claude-X-Y-{name}`）
+4. 在函数顶部用大段注释明确"仅在目的地=OpenRouter 时正确"的架构假设，并指向源文档
+
+**验证**：27 条来自 `docs/vendors/anthropic/{models,vertex,bedrock}.md` 与 `docs/vendors/openrouter/{provider-routing,quickstart,models}.md` 的真实 ID 全部规范化到 OpenRouter 接受的 base 别名。
 
 ## 3. 修复后行为契约（"绝对路由"最终定义）
 

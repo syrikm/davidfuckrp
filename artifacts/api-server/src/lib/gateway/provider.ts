@@ -85,18 +85,61 @@ function normalizePath(raw: string): string {
     .replace(/\/{2,}/g, "/");
 }
 
+// ---------------------------------------------------------------------------
+// canonicalizeLogicalModel
+// ---------------------------------------------------------------------------
+// 重要架构假设（V1.1.9）：本 gateway 当前所有出站流量都通过 Friend Proxy →
+// OpenRouter（见 replit.md "后端路由"）。OpenRouter 的 Claude 模型 ID 使用
+// **dot 形式 + 不带日期/版本后缀**，例如：
+//   - anthropic/claude-3.7-sonnet     （3.x：数字在 sonnet/opus/haiku 之前）
+//   - anthropic/claude-sonnet-4       （4.0 整数版）
+//   - anthropic/claude-sonnet-4.5     （4.x：数字在 sonnet/opus/haiku 之后）
+//   - anthropic/claude-opus-4.5
+//   - anthropic/claude-haiku-4.5
+//
+// 而 Anthropic 官方 API / Vertex / Bedrock 全部使用 **dash 形式 + 可带日期**：
+//   - claude-sonnet-4-5、claude-sonnet-4-5-20250929
+//   - claude-haiku-4-5@20251001                   （Vertex）
+//   - anthropic.claude-sonnet-4-5-20250929-v1:0   （Bedrock）
+//
+// 因此本函数把客户端可能传入的 Anthropic 风格 ID 统一规范化为
+// OpenRouter 风格（dot + 去日期）。**该规范化仅在目的地确实是 OpenRouter
+// 时才正确**；如果将来恢复 Anthropic 直连/Vertex 直连/Bedrock 直连，调用
+// 处必须先把规范化后的 dot ID 反向还原为各家的 dash ID，否则上游会拒绝。
+//
+// 参考文档：docs/vendors/anthropic/models.md, vertex.md, bedrock.md;
+//          docs/vendors/openrouter/{provider-routing,quickstart,models}.md
+// ---------------------------------------------------------------------------
 function canonicalizeLogicalModel(model: string): string {
   const normalized = normalizePath(model).toLowerCase();
   if (!normalized) return normalized;
 
-  if (normalized.startsWith("claude-")) {
-    return normalized.replace(
-      /^(claude-(?:opus|sonnet|haiku)-)(\d+)[._-](\d+)(.*)$/i,
-      (_match, prefix: string, major: string, minor: string, suffix: string) => `${prefix}${major}.${minor}${suffix}`,
-    );
-  }
+  if (!normalized.startsWith("claude-")) return normalized;
 
-  return normalized;
+  // Step 1: 剥离 Anthropic / Vertex / Bedrock 的日期与版本后缀。
+  //   - "@20250929"     (Vertex)
+  //   - "-20250929"     (Anthropic / Bedrock 日期段)
+  //   - "-v1:0" / "-v1" (Bedrock 版本段)
+  let stripped = normalized
+    .replace(/@\d{6,8}.*$/i, "")
+    .replace(/-\d{8}(?:-v\d+(?::\d+)?)?$/i, "")
+    .replace(/-v\d+(?::\d+)?$/i, "");
+
+  // Step 2: 形态 A —— claude-{name}-X-Y → claude-{name}-X.Y (4.x 系列)
+  stripped = stripped.replace(
+    /^(claude-(?:opus|sonnet|haiku)-)(\d+)[._-](\d+)(.*)$/i,
+    (_m, prefix: string, major: string, minor: string, suffix: string) =>
+      `${prefix}${major}.${minor}${suffix}`,
+  );
+
+  // Step 3: 形态 B —— claude-X-Y-{name} → claude-X.Y-{name} (3.x 系列)
+  stripped = stripped.replace(
+    /^(claude-)(\d+)[._-](\d+)(-(?:opus|sonnet|haiku).*)$/i,
+    (_m, prefix: string, major: string, minor: string, suffix: string) =>
+      `${prefix}${major}.${minor}${suffix}`,
+  );
+
+  return stripped;
 }
 
 function canonicalizeModelIdentifier(model: string): string {

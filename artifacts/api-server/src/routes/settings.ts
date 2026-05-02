@@ -9,10 +9,16 @@ const router: IRouter = Router();
 // (local-fs / S3 / R2 / GCS / Replit App Storage) via cloudPersist.
 // File: server_settings.json
 //
-// Initial in-memory state defaults to safe values; an async hydrate runs at
-// module load to overlay persisted values. Same pattern as backendPool and
-// manualModelStore — a few-millisecond race with early GETs is acceptable
-// (the endpoint just reports the default until hydration completes).
+// Hydration barrier: a single hydrationPromise resolves once the persisted
+// value is loaded into in-memory state. The POST handler awaits it before
+// mutating + persisting, eliminating the stale-overwrite race where an
+// early POST would otherwise be clobbered by a late hydrate. The GET
+// handler also awaits so callers see the persisted value (not the default
+// `false`) once the process is up.
+//
+// `getSillyTavernMode()` keeps a sync signature for proxy.ts hot-path
+// callers; before hydrate completes it returns the safe default `false`,
+// which matches behavior when the file does not yet exist.
 // ---------------------------------------------------------------------------
 
 const SETTINGS_FILE = "server_settings.json";
@@ -23,7 +29,7 @@ interface ServerSettings {
 
 const settings: ServerSettings = { sillyTavernMode: false };
 
-void (async () => {
+const hydrationPromise: Promise<void> = (async () => {
   try {
     const raw = await readJson<Partial<ServerSettings>>(SETTINGS_FILE);
     if (raw && typeof raw.sillyTavernMode === "boolean") {
@@ -34,10 +40,13 @@ void (async () => {
   }
 })();
 
-function saveSettings(s: ServerSettings): void {
-  writeJson(SETTINGS_FILE, s).catch((err) => {
+async function saveSettings(s: ServerSettings): Promise<void> {
+  try {
+    await writeJson(SETTINGS_FILE, s);
+  } catch (err) {
     console.error(`[settings] failed to persist ${SETTINGS_FILE}:`, err);
-  });
+    throw err;
+  }
 }
 
 export function getSillyTavernMode(): boolean {
@@ -83,8 +92,9 @@ function checkApiKey(req: Request, res: Response): boolean {
 // GET /settings/sillytavern
 // ---------------------------------------------------------------------------
 
-router.get("/settings/sillytavern", (req: Request, res: Response) => {
+router.get("/settings/sillytavern", async (req: Request, res: Response) => {
   if (!checkApiKey(req, res)) return;
+  await hydrationPromise;
   res.json({ enabled: settings.sillyTavernMode });
 });
 
@@ -92,15 +102,24 @@ router.get("/settings/sillytavern", (req: Request, res: Response) => {
 // POST /settings/sillytavern
 // ---------------------------------------------------------------------------
 
-router.post("/settings/sillytavern", (req: Request, res: Response) => {
+router.post("/settings/sillytavern", async (req: Request, res: Response) => {
   if (!checkApiKey(req, res)) return;
   const { enabled } = req.body as { enabled?: boolean };
   if (typeof enabled !== "boolean") {
     res.status(400).json({ error: { message: "enabled 字段必须为 boolean", type: "invalid_request_error" } });
     return;
   }
+  // Wait for the on-disk value to land in memory before mutating; otherwise a
+  // request that arrives within the first few ms after process start could be
+  // overwritten by the late hydrate.
+  await hydrationPromise;
   settings.sillyTavernMode = enabled;
-  saveSettings(settings);
+  try {
+    await saveSettings(settings);
+  } catch {
+    res.status(500).json({ error: { message: "Failed to persist settings", type: "server_error" } });
+    return;
+  }
   res.json({ enabled: settings.sillyTavernMode });
 });
 

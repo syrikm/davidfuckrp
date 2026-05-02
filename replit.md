@@ -150,6 +150,29 @@
 | `UPDATE_CHECK_URL` | 可选，远端 `version.json` URL，用于版本检测 |
 | `FRIEND_PROXY_URL` / `FRIEND_PROXY_URL_2` ... | 可选，Friend Proxy 节点 URL（mother 100% 出站路径） |
 | `AI_INTEGRATIONS_*_BASE_URL` / `AI_INTEGRATIONS_*_API_KEY` | **仅 sub-node（friend proxy）使用**；mother 不再读这些变量做出站，但 sub-node 在向 mother 注册时仍通过 `computeChildIntegrationsAllReady()` 读取这些变量自报状态 |
+| `STORAGE_BACKEND` | 可选，持久化存储后端：`local`（默认）\| `s3` \| `r2` \| `gcs` \| `replit`。未设置时若检测到 `DEFAULT_OBJECT_STORAGE_BUCKET_ID` 则自动用 `replit`（向下兼容），否则 fallback 到 `local`。 |
+| `STORAGE_LOCAL_DIR` | `local` 模式下的目录，默认 `./data` |
+| `STORAGE_S3_BUCKET` / `STORAGE_S3_ACCESS_KEY_ID` / `STORAGE_S3_SECRET_ACCESS_KEY` | `s3`/`r2` 模式必填 |
+| `STORAGE_S3_ENDPOINT` | `s3` 模式可选（AWS 默认无），R2/MinIO/B2 必填。R2 格式：`https://<account-id>.r2.cloudflarestorage.com` |
+| `STORAGE_S3_REGION` | 默认 `auto`（适配 R2）；AWS S3 需设为真实 region 如 `us-east-1` |
+| `STORAGE_S3_PREFIX` | S3 key 前缀，默认 `config/` |
+| `STORAGE_S3_FORCE_PATH_STYLE` | 设为 `true` 启用 path-style URL（MinIO 等需要） |
+| `STORAGE_GCS_BUCKET` / `STORAGE_GCS_PREFIX` / `GCS_PROJECT_ID` / `GOOGLE_APPLICATION_CREDENTIALS` | `gcs` 模式（标准服务账号，非 Replit sidecar） |
+
+### 推荐云存储：Cloudflare R2（免费）
+
+R2 完全 S3 兼容，10 GB 存储 + 无限出口流量免费，是 mother 脱离 Replit 后首选云存储方案。
+
+```bash
+STORAGE_BACKEND=r2
+STORAGE_S3_BUCKET=ai-proxy-config
+STORAGE_S3_ENDPOINT=https://<your-account-id>.r2.cloudflarestorage.com
+STORAGE_S3_ACCESS_KEY_ID=<r2-access-key>
+STORAGE_S3_SECRET_ACCESS_KEY=<r2-secret-key>
+# STORAGE_S3_REGION 留空即可（默认 "auto"）
+```
+
+获取凭证：Cloudflare Dashboard → R2 → Manage R2 API Tokens → Create API Token → 选择 Object Read & Write 权限 → 选定 bucket → 创建后立即复制 Access Key ID / Secret Access Key。Account ID 在 R2 Overview 页面可见。
 
 ## 版本
 
@@ -157,10 +180,15 @@
 
 ## 持久化文件
 
+通过 `lib/cloudPersist.ts` 写入，背后实际由 `lib/storage/` adapter 层根据 `STORAGE_BACKEND` env 路由到本地磁盘 / S3 / R2 / GCS / Replit App Storage。
+
 - `dynamic_backends.json` — 动态 Friend Proxy 节点列表
 - `server_settings.json` — 服务器设置（含 SillyTavern 模式开关）
 - `usage_stats.json` — 用量统计（按节点 + 按模型，含 cacheReadTokens / cacheWriteTokens，10s 去抖 + 5min 安全写入）
 - `disabled_models.json` — 禁用模型列表
+- `managed_models.json` / `custom_openrouter_models.json` / `model_routes.json` / `routing_settings.json` / `stability_state.json` — 模型管理与路由配置
+
+**Stage B 完成（V1.1.9）：** 新增 `lib/storage/{adapter,local,s3,gcs,replit,index}.ts` 六文件 adapter 层，`cloudPersist.ts` 改为 30 行薄包装；mother 默认（无 env）即可在 vanilla Node 容器跑，写入 `./data/`。R2 通过 S3 adapter 完整支持。
 
 ## Workspace
 

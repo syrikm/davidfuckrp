@@ -26,8 +26,10 @@ caches, hot-updater background timer, and SSE streaming above 60 s).
 |---|---|---|---|
 | `PROXY_API_KEY` | **yes** | — | Server refuses to start without it. Auth token for `/api/*` admin & `/v1/*` proxy. |
 | `PORT` | no | `8080` | HTTP listen port (most platforms inject this). |
-| `STORAGE_BACKEND` | no | `local` | `local` (filesystem) or `s3` (S3 / R2 / B2 / MinIO). Use `s3` on scale-to-zero unless you mount a persistent volume. |
-| `S3_ENDPOINT` `S3_REGION` `S3_BUCKET` `S3_ACCESS_KEY_ID` `S3_SECRET_ACCESS_KEY` | conditional | — | Required when `STORAGE_BACKEND=s3`. |
+| `STORAGE_BACKEND` | no | `local` | `local` / `s3` / `r2` (alias for s3) / `gcs` / `replit`. Use `s3` or `r2` on scale-to-zero platforms without persistent volumes. |
+| `STORAGE_S3_BUCKET` `STORAGE_S3_ENDPOINT` `STORAGE_S3_ACCESS_KEY_ID` `STORAGE_S3_SECRET_ACCESS_KEY` | conditional | — | Required when `STORAGE_BACKEND=s3` or `=r2`. |
+| `STORAGE_S3_REGION` | no | `auto` | `auto` works for R2; AWS S3 needs the real region. |
+| `STORAGE_S3_FORCE_PATH_STYLE` | no | `false` | Set to `true` for MinIO and other path-style S3 servers. |
 | `OPENROUTER_API_KEY` | no | — | Default OR backend; can also be configured per-backend via `/api/backends`. |
 | `MOTHER_NODE_URL` | no | — | If running as a child reporting up to a mother — leave empty for the mother itself. |
 
@@ -128,13 +130,15 @@ docker run -p 8080:8080 \
 
 `STORAGE_BACKEND=local` writes to `/app/data` (model registry, OR snapshots, response cache, usage stats). The Dockerfile creates this directory and `chown`s it to the `node` user. **Mount a volume there or you lose state on every container restart.**
 
-`STORAGE_BACKEND=s3` works with anything S3-compatible — no volume needed:
+`STORAGE_BACKEND=s3` (or `r2`, which is just an alias) works with anything S3-compatible — no volume needed:
 - AWS S3
-- Cloudflare R2 (`S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com`)
-- Backblaze B2 (`S3_ENDPOINT=https://s3.<region>.backblazeb2.com`)
-- MinIO self-hosted
+- Cloudflare R2 (`STORAGE_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`)
+- Backblaze B2 (`STORAGE_S3_ENDPOINT=https://s3.<region>.backblazeb2.com`)
+- MinIO self-hosted (also set `STORAGE_S3_FORCE_PATH_STYLE=true`)
 
 Bucket only needs read+write to a single prefix; no public access required.
+
+For a step-by-step Cloudflare R2 walkthrough see the **Cloudflare R2 配置教程** section in [`README.md`](./README.md).
 
 ---
 

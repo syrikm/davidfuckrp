@@ -27,9 +27,7 @@ OpenAI / Anthropic 兼容的 AI 代理网关，**母节点**。
 1. **没有持久磁盘** —— Render 免费层不支持 disk，容器重启 / 重新部署会丢本地数据（模型注册表、用法统计、缓存）。
 2. **15 分钟空闲就 sleep**。
 
-→ **要持久化就改用 S3/R2 存储**（数据存对象存储里，容器死了不丢）：
-- 注册 [Cloudflare R2](https://developers.cloudflare.com/r2/)（免费 10 GB + 100 万次/月写入）
-- 在 Render 环境变量里设：`STORAGE_BACKEND=s3` + `S3_ENDPOINT` + `S3_REGION=auto` + `S3_BUCKET` + `S3_ACCESS_KEY_ID` + `S3_SECRET_ACCESS_KEY`
+→ **要持久化就改用 R2 存储**（数据存对象存储里，容器死了不丢）。详细步骤见下面 [Cloudflare R2 配置](#cloudflare-r2-配置教程) 一节。
 
 ### 升级到付费（$7/mo Starter）
 
@@ -39,14 +37,76 @@ OpenAI / Anthropic 兼容的 AI 代理网关，**母节点**。
 
 ---
 
+## Cloudflare R2 配置教程
+
+R2 是 S3 兼容的对象存储，免费层给 10 GB 容量 + 100 万次/月 Class A 写、1000 万次 Class B 读，对这个网关绰绰有余（模型注册表、用法统计、缓存都是小文件 + 低频写）。
+
+### 第 1 步：建 bucket
+
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/) → 左侧 **R2 Object Storage**
+2. 第一次用会让你同意条款 / 绑信用卡（不超免费层不会扣）
+3. **Create bucket** → 名字随便（例如 `davidfuckrp`），Location 选 `Automatic` 或 `Asia-Pacific`
+4. 建完点进 bucket → **Settings** → 翻到下面记下 **S3 API** 的 endpoint，长这样：
+   ```
+   https://abc123def456.r2.cloudflarestorage.com
+   ```
+   开头那串 `abc123def456` 就是你的 Account ID
+
+### 第 2 步：建 API Token
+
+1. 回到 R2 主页 → 右上 **Manage R2 API Tokens**（或 R2 → API → Manage API tokens）
+2. **Create API Token**
+3. 配置：
+   - **Token name**：随便，例如 `davidfuckrp-render`
+   - **Permissions**：选 **Object Read & Write**
+   - **Specify bucket(s)**：选 **Apply to specific buckets only** → 勾上你刚才建的 bucket（最小权限原则；也可以选 All buckets，懒人用）
+   - **TTL**：Forever（除非你想定期轮换）
+   - **Client IP Address Filtering**：留空
+4. **Create API Token** → 这一页**只显示一次**，立刻复制：
+   - **Access Key ID**
+   - **Secret Access Key**
+
+### 第 3 步：在 Render 加环境变量
+
+Render Dashboard → 你的 service → **Environment** 标签 → **Add Environment Variable**，加这 5 个 + 改 1 个：
+
+| Key | Value |
+|---|---|
+| `STORAGE_BACKEND` | `r2`（**改**，原来是 `local`） |
+| `STORAGE_S3_BUCKET` | 你的 bucket 名（例如 `davidfuckrp`） |
+| `STORAGE_S3_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com`（**不带 bucket 名**） |
+| `STORAGE_S3_ACCESS_KEY_ID` | 第 2 步复制的 Access Key ID |
+| `STORAGE_S3_SECRET_ACCESS_KEY` | 第 2 步复制的 Secret Access Key |
+
+`STORAGE_S3_REGION` 不用设，默认 `auto` 就是 R2 用的。
+
+**Save Changes** → Render 自动触发重新部署。
+
+### 第 4 步：验证
+
+1. Render service → **Logs** 标签，找到这一行：
+   ```
+   [storage] using adapter: S3StorageAdapter (selected via STORAGE_BACKEND env)
+   ```
+2. 浏览器打开 `https://<your-app>.onrender.com/api/health` → 200
+3. 在管理后台 portal 添加一个 backend / 模型，然后回 Cloudflare R2 → 你的 bucket → 应该能看到 `models/`、`backends/`、`usage/` 这些目录被创建
+
+如果日志里报 `Access Denied` / `403` —— 99% 是 token 没勾对 bucket 权限，回第 2 步重做。
+如果报 `NoSuchBucket` —— 检查 `STORAGE_S3_BUCKET` 拼写。
+如果报 `connect ENOTFOUND` —— `STORAGE_S3_ENDPOINT` 写错（最常见：把 bucket 名拼到 endpoint 里去了，**别拼**）。
+
+---
+
 ## 环境变量速查
 
 | 变量 | 必填 | 默认 | 说明 |
 |---|---|---|---|
 | `PROXY_API_KEY` | **是** | — | 没设直接拒启动。`/api/*` 后台 + `/v1/*` 代理鉴权 |
 | `PORT` | 否 | `8080` | HTTP 端口 |
-| `STORAGE_BACKEND` | 否 | `local` | `local`（挂卷到 `/app/data`）或 `s3` |
-| `S3_ENDPOINT` `S3_REGION` `S3_BUCKET` `S3_ACCESS_KEY_ID` `S3_SECRET_ACCESS_KEY` | 条件 | — | `STORAGE_BACKEND=s3` 时必填 |
+| `STORAGE_BACKEND` | 否 | `local` | `local` / `s3` / `r2`（s3 别名）/ `gcs` / `replit` |
+| `STORAGE_S3_BUCKET` `STORAGE_S3_ENDPOINT` `STORAGE_S3_ACCESS_KEY_ID` `STORAGE_S3_SECRET_ACCESS_KEY` | 条件 | — | `STORAGE_BACKEND=s3` 或 `=r2` 时必填 |
+| `STORAGE_S3_REGION` | 否 | `auto` | R2 用 `auto`；AWS S3 用真实 region |
+| `STORAGE_S3_FORCE_PATH_STYLE` | 否 | `false` | MinIO 等需要 path-style URL 时设 `true` |
 | `OPENROUTER_API_KEY` | 否 | — | OR 默认 backend；也可在 `/api/backends` 里配置 |
 | `MOTHER_NODE_URL` | 否 | — | 留空表示自身就是母节点 |
 

@@ -1,0 +1,28 @@
+# Render Blueprint — one-click deploy via "New Blueprint" in the Render UI.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: davidfuckrp
+    runtime: docker
+    plan: starter        # use "free" if you want sleep-on-idle (cold starts ~30s)
+    region: singapore    # change to oregon / frankfurt / ohio if you prefer
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: PROXY_API_KEY
+        sync: false        # prompts user to fill in via Render UI
+      - key: STORAGE_BACKEND
+        value: local
+      - key: PORT
+        value: "8080"
+      - key: NODE_ENV
+        value: production
+      # Optional — uncomment & sync via Render UI when you have them
+      # - key: OPENROUTER_API_KEY
+      #   sync: false

@@ -15,7 +15,7 @@ services:
     runtime: docker
     plan: free
     region: singapore    # change to oregon / frankfurt / ohio if you prefer
-    branch: deploy/render
+    branch: main
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/healthz
     autoDeploy: true

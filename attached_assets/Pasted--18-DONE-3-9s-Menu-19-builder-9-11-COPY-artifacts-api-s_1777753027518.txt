@@ -1,0 +1,48 @@
+#18 DONE 3.9s
+Menu
+#19 [builder  9/11] COPY artifacts/api-server artifacts/api-server
+#19 DONE 0.2s
+#20 [builder 10/11] RUN pnpm --filter @workspace/api-server run build
+#20 0.536 
+#20 0.536 > @workspace/api-server@0.0.0 build /build/artifacts/api-server
+#20 0.536 > node ./build.mjs
+#20 0.536 
+#20 0.609 ▲ [WARNING] Cannot find base config file "../../tsconfig.base.json" [tsconfig.json]
+#20 0.609 
+#20 0.609     tsconfig.json:2:13:
+#20 0.609       2 │   "extends": "../../tsconfig.base.json",
+#20 0.609         ╵              ~~~~~~~~~~~~~~~~~~~~~~~~~~
+#20 0.609 
+#20 0.638 ▲ [WARNING] Cannot find base config file "../../tsconfig.base.json" [tsconfig.json]
+#20 0.638 
+#20 0.638     ../../lib/api-zod/tsconfig.json:2:13:
+#20 0.638       2 │   "extends": "../../tsconfig.base.json",
+#20 0.638         ╵              ~~~~~~~~~~~~~~~~~~~~~~~~~~
+#20 0.638 
+#20 0.726 2 warnings
+#20 0.726 
+#20 0.726   dist/index.mjs                       1.8mb ⚠️
+#20 0.726   dist/pino-worker.mjs               153.4kb
+#20 0.726   dist/pino-file.mjs                 142.0kb
+#20 0.726   dist/pino-pretty.mjs               114.6kb
+#20 0.726   dist/thread-stream-worker.mjs        7.3kb
+#20 0.726   dist/index.mjs.map                   3.1mb
+#20 0.726   dist/pino-worker.mjs.map           256.9kb
+#20 0.726   dist/pino-file.mjs.map             229.0kb
+#20 0.726   dist/pino-pretty.mjs.map           203.9kb
+#20 0.726   dist/thread-stream-worker.mjs.map   12.0kb
+#20 0.726 
+#20 0.726 ⚡ Done in 119ms
+#20 DONE 0.8s
+#21 [builder 11/11] RUN pnpm --filter @workspace/api-server deploy --prod /app
+#21 0.564  ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE  By default, starting from pnpm v10, we only deploy from workspaces that have "inject-workspace-packages=true" set
+#21 0.564 
+#21 0.564 If you want to deploy without using injected dependencies, run "pnpm deploy" with the "--legacy" flag or set "force-legacy-deploy" to true
+#21 ERROR: process "/bin/sh -c pnpm --filter @workspace/api-server deploy --prod /app" did not complete successfully: exit code: 1
+------
+ > [builder 11/11] RUN pnpm --filter @workspace/api-server deploy --prod /app:
+0.564  ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE  By default, starting from pnpm v10, we only deploy from workspaces that have "inject-workspace-packages=true" set
+0.564 
+0.564 If you want to deploy without using injected dependencies, run "pnpm deploy" with the "--legacy" flag or set "force-legacy-deploy" to true
+------
+error: failed to solve: process "/bin/sh -c pnpm --filter @workspace/api-server deploy --prod /app" did not complete successfully: exit code: 1

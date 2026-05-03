@@ -79,6 +79,7 @@ import {
   summarizeIR,
 } from "../lib/gateway";
 import type { GatewayProviderRoute } from "../lib/gateway";
+import { routeIsNative, handleNativeIntegration } from "../lib/native-integrations";
 
 // TS compatibility shim for this artifact build target.
 declare const fetch: any;
@@ -3596,6 +3597,120 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     if (finish) finishInflight = finish;
   }
 
+  // ---------------------------------------------------------------------------
+  // Native AI-integration dispatcher (post-cache, pre-friend).
+  //
+  // For provider-prefixed models that lock to a Vertex Claude or Vertex/Google
+  // Gemini backend, bypass the friend-proxy → Replit modelfarm OpenRouter path
+  // (which silently routes claude-opus-* to AWS Bedrock regardless of the
+  // requested provider) and call Replit's native Anthropic / Gemini integration
+  // directly. The native integrations route through Vertex (msg_vrtx_* IDs) and
+  // Google respectively.
+  //
+  //   vertex/claude-*    → Anthropic integration (Vertex)
+  //   anthropic/claude-* → Anthropic integration (Vertex)
+  //   vertex/gemini-*    → Gemini integration (Google)
+  //   aistudio|google/gemini-* → Gemini integration (Google)
+  //
+  // bedrock/* and any model NOT on the supported native list (e.g.
+  // claude-haiku-4-6) fall through to the regular friend-proxy path.
+  //
+  // Cache integration: response cache HIT/inflight-dedup logic above runs
+  // before this block, so identical non-stream requests hitting cache never
+  // reach native at all. On native non-stream success we cacheSet() the
+  // returned OAI body so subsequent identical requests reuse it. Stream and
+  // error paths skip cacheSet (mirrors friend-proxy behaviour).
+  //
+  // NOTE on Anthropic prompt cache (cache_control: ephemeral):
+  // Probed against AI_INTEGRATIONS_ANTHROPIC_BASE_URL with a 2.2 K-token
+  // system block + ephemeral marker — modelfarm returned
+  // cache_creation_input_tokens=0 and cache_read_input_tokens=0 on both the
+  // initial and a repeat call. The Replit modelfarm Anthropic integration
+  // does NOT honour Anthropic prompt caching; the cache_control field is
+  // accepted silently with zero effect. Mother's own response cache (this
+  // block) is the only cache layer available on the native path.
+  // ---------------------------------------------------------------------------
+  const nativeRoute = routeIsNative(selectedModel);
+  if (nativeRoute) {
+    const t0Native = Date.now();
+    let nativeCaptured: unknown = null;
+    let origJsonForCache: ((body: unknown) => Response) | null = null;
+    if (responseCacheKey && !shouldStream) {
+      origJsonForCache = res.json.bind(res) as (body: unknown) => Response;
+      (res as Response & { json: Response["json"] }).json = ((data: unknown): Response => {
+        nativeCaptured = data;
+        return origJsonForCache!(data);
+      }) as Response["json"];
+    }
+    try {
+      const r = await handleNativeIntegration({ req, res, route: nativeRoute, body: rawBody });
+      const duration = Date.now() - t0Native;
+      const backendLabel = `native-${nativeRoute.kind}`;
+      const priceUSD = estimateCostUSD(selectedModel, r.promptTokens, r.completionTokens, r.cacheReadTokens, r.cacheWriteTokens);
+
+      // Cache successful non-stream responses (same robustness check as friend path:
+      // body must have an id and a non-empty choices array — guards against caching
+      // upstream error objects accidentally returned with 200 OK).
+      if (responseCacheKey && nativeCaptured !== null) {
+        const j = nativeCaptured as { id?: string; choices?: unknown[] };
+        if (j.id && Array.isArray(j.choices) && j.choices.length > 0) {
+          cacheSet(responseCacheKey, nativeCaptured, selectedModel);
+        }
+      }
+      finishInflight?.();
+
+      recordCallStat(backendLabel, duration, r.promptTokens, r.completionTokens, r.ttftMs, selectedModel, r.cacheReadTokens, r.cacheWriteTokens);
+      recordCostStat(backendLabel, priceUSD);
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: backendLabel, status: 200, duration, stream: shouldStream,
+        promptTokens: r.promptTokens, completionTokens: r.completionTokens,
+        cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens,
+        cacheTier: r.cacheTier || undefined,
+        priceUSD,
+        level: "info",
+      });
+      req.log.info({
+        model: selectedModel,
+        nativeKind: nativeRoute.kind,
+        nativeModel: nativeRoute.model,
+        durationMs: duration,
+        promptTok: r.promptTokens,
+        completionTok: r.completionTokens,
+        responseCached: !!(responseCacheKey && nativeCaptured),
+        priceUSD,
+      }, "[native] request done via Replit AI integration (bypassed friend proxy)");
+      return;
+    } catch (err) {
+      finishInflight?.();
+      const status = (err as Error & { status?: number }).status ?? 0;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: errMsg, status, model: selectedModel, kind: nativeRoute.kind },
+        "[native] integration call failed");
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: `native-${nativeRoute.kind}`, status: status || 500,
+        duration: Date.now() - t0Native, stream: shouldStream,
+        level: "error", error: errMsg,
+      });
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          try {
+            res.write(`data: ${JSON.stringify({ error: { message: errMsg } })}\n\n`);
+            res.write("data: [DONE]\n\n");
+          } catch { /* ignore */ }
+          res.end();
+        }
+      } else {
+        const clientStatus = (status >= 400 && status < 500) ? status : 502;
+        res.status(clientStatus).json({
+          error: { message: `Native AI integration error: ${errMsg}`, type: "native_integration_error" },
+        });
+      }
+      return;
+    }
+  }
+
   // Try every available backend before giving up — with N sub-nodes we have N-1
   // retries.  A hard-coded 3 is dangerously low when there are 14+ nodes.
   // SVD principle: cache-affinity routing concentrates traffic on one node;
@@ -7090,5 +7205,54 @@ router.all(/^\/v1\/(?!admin|jobs)/, requireApiKey, async (req: Request, res: Res
 // All traffic goes through handleFriendProxy (friend proxy sub-nodes only).
 // Local AI SDK calls are banned at the architecture level.
 // ---------------------------------------------------------------------------
+
+// TEMP DIAG — REMOVE AFTER DEBUG
+router.post("/__diag/or-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_OPENROUTER_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+  if (!key) { res.status(500).json({ error: "no OR key" }); return; }
+  const r = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(req.body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, json: json ?? text });
+});
+router.post("/__diag/anthropic-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com/v1";
+  if (!key) { res.status(500).json({ error: "no anthropic key" }); return; }
+  const r = await fetch(`${base}/messages`, {
+    method: "POST",
+    headers: {
+      "x-api-key": key,
+      Authorization: `Bearer ${key}`,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(req.body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, json: json ?? text });
+});
+router.post("/__diag/gemini-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"] ?? "https://generativelanguage.googleapis.com/v1beta";
+  if (!key) { res.status(500).json({ error: "no gemini key" }); return; }
+  const model = (req.body && typeof req.body === "object" && (req.body as Record<string, unknown>)["model"]) || "gemini-2.0-flash";
+  const body = { ...(req.body as Record<string, unknown>) };
+  delete body["model"];
+  const r = await fetch(`${base}/models/${String(model)}:generateContent?key=${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, model, json: json ?? text });
+});
 
 export default router;

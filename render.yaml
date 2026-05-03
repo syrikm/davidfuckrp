@@ -28,7 +28,7 @@ services:
       - key: PROXY_API_KEY
         sync: false        # prompts user to fill in via Render UI
       - key: STORAGE_BACKEND
-        value: local       # change to "s3" for persistence on free plan
+        value: r2          # default = R2 (Cloudflare S3-compatible). Set STORAGE_S3_* secrets in Render UI. Use "local" for ephemeral free-tier (data lost on restart).
       - key: PORT
         value: "8080"
       - key: NODE_ENV
@@ -48,3 +48,4 @@ services:
       #   sync: false
       # - key: STORAGE_S3_REGION
       #   value: auto         # default — works for R2; set real region for AWS
+

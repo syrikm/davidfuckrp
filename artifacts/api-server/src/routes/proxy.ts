@@ -79,6 +79,7 @@ import {
   summarizeIR,
 } from "../lib/gateway";
 import type { GatewayProviderRoute } from "../lib/gateway";
+import { routeIsNative, handleNativeIntegration } from "../lib/native-integrations";
 
 // TS compatibility shim for this artifact build target.
 declare const fetch: any;
@@ -3521,6 +3522,79 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   const startTime = Date.now();
   if (selectedModel !== (model ?? "gpt-5.2")) {
     req.log.info({ originalModel: model, resolvedModel: selectedModel }, "model route applied");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Native AI-integration dispatcher.
+  //
+  // For provider-prefixed models that lock to a Vertex Claude or Vertex/Google
+  // Gemini backend, bypass the friend-proxy → Replit modelfarm OpenRouter path
+  // (which silently routes claude-opus-* to AWS Bedrock regardless of the
+  // requested provider) and call Replit's native Anthropic / Gemini integration
+  // directly. The native integrations route through Vertex (msg_vrtx_* IDs) and
+  // Google respectively.
+  //
+  //   vertex/claude-*    → Anthropic integration (Vertex)
+  //   anthropic/claude-* → Anthropic integration (Vertex)
+  //   vertex/gemini-*    → Gemini integration (Google)
+  //   aistudio|google/gemini-* → Gemini integration (Google)
+  //
+  // bedrock/* and any model NOT on the supported native list (e.g.
+  // claude-haiku-4-6) fall through to the regular friend-proxy path.
+  // ---------------------------------------------------------------------------
+  const nativeRoute = routeIsNative(selectedModel);
+  if (nativeRoute) {
+    const t0Native = Date.now();
+    try {
+      const r = await handleNativeIntegration({ req, res, route: nativeRoute, body: rawBody });
+      const duration = Date.now() - t0Native;
+      const backendLabel = `native-${nativeRoute.kind}`;
+      const priceUSD = estimateCostUSD(selectedModel, r.promptTokens, r.completionTokens, r.cacheReadTokens, r.cacheWriteTokens);
+      recordCallStat(backendLabel, duration, r.promptTokens, r.completionTokens, r.ttftMs, selectedModel, r.cacheReadTokens, r.cacheWriteTokens);
+      recordCostStat(backendLabel, priceUSD);
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: backendLabel, status: 200, duration, stream: shouldStream,
+        promptTokens: r.promptTokens, completionTokens: r.completionTokens,
+        cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens,
+        cacheTier: r.cacheTier || undefined,
+        priceUSD,
+        level: "info",
+      });
+      req.log.info({
+        model: selectedModel,
+        nativeKind: nativeRoute.kind,
+        nativeModel: nativeRoute.model,
+        durationMs: duration,
+        promptTok: r.promptTokens,
+        completionTok: r.completionTokens,
+        priceUSD,
+      }, "[native] request done via Replit AI integration (bypassed friend proxy)");
+      return;
+    } catch (err) {
+      const status = (err as Error & { status?: number }).status ?? 0;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: errMsg, status, model: selectedModel, kind: nativeRoute.kind },
+        "[native] integration call failed");
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: `native-${nativeRoute.kind}`, status: status || 500,
+        duration: Date.now() - t0Native, stream: shouldStream,
+        level: "error", error: errMsg,
+      });
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          try {
+            res.write(`data: ${JSON.stringify({ error: { message: errMsg } })}\n\n`);
+            res.write("data: [DONE]\n\n");
+          } catch { /* ignore */ }
+          res.end();
+        }
+        return;
+      }
+      // Headers not sent yet: fall through to friend-proxy fallback below.
+      req.log.warn({ model: selectedModel }, "[native] falling back to friend-proxy path");
+    }
   }
 
   // Claude family check — covers direct Anthropic models AND OpenRouter's anthropic/* paths.

@@ -14,7 +14,7 @@ OpenAI / Anthropic 兼容的 AI 代理网关，**母节点**。
 
 ## 一键部署（Render 免费层）
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/syrikm/davidfuckrp&branch=deploy/render)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/syrikm/davidfuckrp)
 
 **默认配置 = $0/月免费计划**：512 MB RAM、新加坡区、15 分钟无请求自动休眠（下次请求冷启动 ~30s）。
 

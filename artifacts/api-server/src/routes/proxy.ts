@@ -1183,25 +1183,48 @@ function normalizeFriendModel(m: string): string {
 //     `allow_fallbacks` / `order` — does NOT throw.  The lock is the
 //     contract; the client cannot widen or escape it, but the request
 //     still succeeds against the locked provider.
+// Per-hop trust signal. When mother forwards a request to a friend backend
+// (or friend forwards to its own friend), the outbound fetch sets the header
+//   X-DavidProxy-Chain: v1
+// The receiving node reads it at the route entry and propagates a
+// `chainMode` flag down to buildAbsoluteProviderBlock. The header is a
+// per-hop concern: it never leaves this gateway mesh because every fetch
+// in handleFriendProxy / /v1/messages forward sets its own request headers
+// from scratch (it does not splat req.headers), so the marker cannot leak
+// to OpenRouter.
+const CHAIN_HEADER = "x-davidproxy-chain";
+const CHAIN_VERSION = "v1";
+
+function isChainHop(req: Pick<Request, "headers">): boolean {
+  return req.headers[CHAIN_HEADER] === CHAIN_VERSION;
+}
+
 function buildAbsoluteProviderBlock(
   route: GatewayProviderRoute,
   clientProvider: unknown,
+  opts?: { chainMode?: boolean },
 ): Record<string, unknown> {
-  // Chain-respect contract (mother → friend → OpenRouter):
-  //   When a request flows through the davidfuckrp gateway chain, the FIRST
-  //   node (mother, talking to a real client) computes the absolute route
-  //   from the prefix and pins it via `provider.only`/`order`/
-  //   `allow_fallbacks`. Every DOWNSTREAM node (friend / sub-friend / …)
-  //   sees that pinned `provider` block on the inbound body and MUST honour
-  //   it — re-deriving a different lock from the canonicalised model id
-  //   (which by then no longer carries the original prefix) silently
-  //   replaces the upstream caller's groq lock with e.g. an `openai/`
-  //   author-derived openai lock, causing OpenRouter to route to a
-  //   different sub-channel.
+  // Two role-distinct modes share this function:
   //
-  //   Therefore: client-supplied `provider.only` / `order` /
-  //   `allow_fallbacks` take precedence over our route-derived defaults
-  //   when explicitly set. Route-derived values fill in any gaps.
+  //   • client-entry mode (chainMode=false, default) — a real client called
+  //     mother's `/v1/chat/completions` or `/v1/messages`. The route lock
+  //     is the contract; client-supplied `only` / `order` /
+  //     `allow_fallbacks` is silently overwritten so callers cannot widen
+  //     or escape the lock. (Original davidfuckrp contract — preserved.)
+  //
+  //   • chain-relay mode (chainMode=true) — the inbound request came from
+  //     another node in the davidfuckrp gateway mesh, identified by the
+  //     `X-DavidProxy-Chain: v1` header set by handleFriendProxy on every
+  //     mother→friend fetch. In that case the upstream node already
+  //     computed the route from the original prefixed model id; the
+  //     canonicalised model id reaching us no longer carries that prefix
+  //     and our local `detectAbsoluteProviderRoute` would derive a
+  //     DIFFERENT (wrong) lock from the canonical author segment
+  //     (`openai/gpt-oss-120b` → openai). To preserve the upstream lock
+  //     across the chain we honour client-supplied `only` / `order` /
+  //     `allow_fallbacks` when they are explicitly set; route-derived
+  //     values fill any gaps.
+  const chainMode = opts?.chainMode === true;
   const out: Record<string, unknown> = {};
   let clientOnly: unknown = undefined;
   let clientOrder: unknown = undefined;
@@ -1215,15 +1238,17 @@ function buildAbsoluteProviderBlock(
     }
   }
 
-  // OpenRouter's hard provider lock semantics:
-  //   • `provider.order` alone is a *preference* — OR can still pick another
-  //     sub-channel even with `allow_fallbacks:false` (empirically observed
-  //     2026-05-03: groq/gpt-oss-120b returned Parasail, cerebras→Parasail,
-  //     fireworks→DeepInfra, etc.).
-  //   • `provider.only` is the *whitelist* — OR will refuse any provider
-  //     outside this list. This is what the route-prefix → single-provider
-  //     contract expects.
-  const onlyFromClient = (Array.isArray(clientOnly) && (clientOnly as unknown[]).length)
+  // OpenRouter's documented hard-lock semantics (verified 2026-05-03 against
+  // OR's own zod schema in https://openrouter.ai/docs/features/provider-routing):
+  //   • `order`: ordered list; router tries first available, falls back if
+  //     `allow_fallbacks=true` (the default).
+  //   • `allow_fallbacks=false`: "use only the primary/custom provider, and
+  //     return the upstream error if it's unavailable" — this is THE hard
+  //     lock when combined with `order`.
+  //   • `only`: allow-list filter merged with account-wide allowed providers
+  //     — narrows the candidate pool further. Belt-and-suspenders alongside
+  //     the order+allow_fallbacks lock.
+  const onlyFromClient = chainMode && Array.isArray(clientOnly) && (clientOnly as unknown[]).length
     ? (clientOnly as string[])
     : null;
   const onlyFromRoute = route.only?.length
@@ -1231,7 +1256,7 @@ function buildAbsoluteProviderBlock(
     : (route.order?.length ? route.order : (route.provider ? [route.provider] : null));
   const finalOnly = onlyFromClient ?? onlyFromRoute;
 
-  const orderFromClient = (Array.isArray(clientOrder) && (clientOrder as unknown[]).length)
+  const orderFromClient = chainMode && Array.isArray(clientOrder) && (clientOrder as unknown[]).length
     ? (clientOrder as string[])
     : null;
   const orderFromRoute = route.order?.length ? route.order : null;
@@ -1239,8 +1264,10 @@ function buildAbsoluteProviderBlock(
 
   if (finalOrder) out.order = [...finalOrder];
   if (finalOnly) out.only = [...finalOnly];
-  // Client may explicitly opt back into fallbacks (rare); otherwise force off.
-  out.allow_fallbacks = clientAllowFallbacks === true ? true : false;
+  // In chain-relay mode the upstream node may have explicitly opted back
+  // into fallbacks (rare); honour it. In client-entry mode always force
+  // false — the route lock is the contract.
+  out.allow_fallbacks = chainMode && clientAllowFallbacks === true ? true : false;
   return out;
 }
 
@@ -4195,8 +4222,9 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   // /v1/messages is a thin pass-through, so we mutate the body in-place.
   const messagesRoute = detectAbsoluteProviderRoute(selectedModel);
   const messagesLockedSlug = messagesRoute?.provider;
+  const messagesChainMode = isChainHop(req);
   if (messagesRoute) {
-    body["provider"] = buildAbsoluteProviderBlock(messagesRoute, body["provider"]);
+    body["provider"] = buildAbsoluteProviderBlock(messagesRoute, body["provider"], { chainMode: messagesChainMode });
     req.log.info({
       model: selectedModel,
       providerPrefix: messagesRoute.prefix,
@@ -4343,6 +4371,8 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
           "Content-Type": "application/json",
           "anthropic-version": (req.headers["anthropic-version"] as string | undefined) ?? "2023-06-01",
           ...(req.headers["anthropic-beta"] ? { "anthropic-beta": req.headers["anthropic-beta"] as string } : {}),
+          // Per-hop trust signal — see CHAIN_HEADER block at top of file.
+          [CHAIN_HEADER]: CHAIN_VERSION,
         },
         body: JSON.stringify(body),
         signal: msgAbort.signal,
@@ -6481,7 +6511,7 @@ async function handleFriendProxy({
       const routeSrc = (typeof routingModel === "string" && routingModel) ? routingModel : model;
       const route = detectAbsoluteProviderRoute(routeSrc);
       if (route) {
-        b["provider"] = buildAbsoluteProviderBlock(route, b["provider"]);
+        b["provider"] = buildAbsoluteProviderBlock(route, b["provider"], { chainMode: isChainHop(req) });
       } else {
         const isORClaude = model.toLowerCase().startsWith("anthropic/");
         if (isORClaude && !b["provider"]) {
@@ -6659,7 +6689,15 @@ async function handleFriendProxy({
     }, "[WIRE_DEBUG] friend-proxy outbound JSON");
     const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${backend.apiKey}`,
+        "Content-Type": "application/json",
+        // Per-hop trust signal: tell the receiving friend node this is an
+        // internal chain relay so its buildAbsoluteProviderBlock honours
+        // the upstream lock instead of re-deriving from the canonicalised
+        // model id.  See CHAIN_HEADER comment block at top of file.
+        [CHAIN_HEADER]: CHAIN_VERSION,
+      },
       body: _outboundJson,
       signal: AbortSignal.timeout(GATEWAY_TIMEOUTS.upstreamLongPollMs),
     });

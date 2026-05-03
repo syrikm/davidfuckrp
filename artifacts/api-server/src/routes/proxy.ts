@@ -1187,18 +1187,60 @@ function buildAbsoluteProviderBlock(
   route: GatewayProviderRoute,
   clientProvider: unknown,
 ): Record<string, unknown> {
+  // Chain-respect contract (mother → friend → OpenRouter):
+  //   When a request flows through the davidfuckrp gateway chain, the FIRST
+  //   node (mother, talking to a real client) computes the absolute route
+  //   from the prefix and pins it via `provider.only`/`order`/
+  //   `allow_fallbacks`. Every DOWNSTREAM node (friend / sub-friend / …)
+  //   sees that pinned `provider` block on the inbound body and MUST honour
+  //   it — re-deriving a different lock from the canonicalised model id
+  //   (which by then no longer carries the original prefix) silently
+  //   replaces the upstream caller's groq lock with e.g. an `openai/`
+  //   author-derived openai lock, causing OpenRouter to route to a
+  //   different sub-channel.
+  //
+  //   Therefore: client-supplied `provider.only` / `order` /
+  //   `allow_fallbacks` take precedence over our route-derived defaults
+  //   when explicitly set. Route-derived values fill in any gaps.
   const out: Record<string, unknown> = {};
+  let clientOnly: unknown = undefined;
+  let clientOrder: unknown = undefined;
+  let clientAllowFallbacks: unknown = undefined;
   if (clientProvider && typeof clientProvider === "object" && !Array.isArray(clientProvider)) {
     for (const [k, v] of Object.entries(clientProvider as Record<string, unknown>)) {
-      // Strip the keys we are about to force-set so we don't accidentally
-      // preserve a stale client value.
-      if (k === "only" || k === "allow_fallbacks" || k === "order") continue;
+      if (k === "only") { clientOnly = v; continue; }
+      if (k === "order") { clientOrder = v; continue; }
+      if (k === "allow_fallbacks") { clientAllowFallbacks = v; continue; }
       out[k] = v;
     }
   }
-  if (route.order?.length) out.order = [...route.order];
-  if (route.only?.length) out.only = [...route.only];
-  out.allow_fallbacks = false;
+
+  // OpenRouter's hard provider lock semantics:
+  //   • `provider.order` alone is a *preference* — OR can still pick another
+  //     sub-channel even with `allow_fallbacks:false` (empirically observed
+  //     2026-05-03: groq/gpt-oss-120b returned Parasail, cerebras→Parasail,
+  //     fireworks→DeepInfra, etc.).
+  //   • `provider.only` is the *whitelist* — OR will refuse any provider
+  //     outside this list. This is what the route-prefix → single-provider
+  //     contract expects.
+  const onlyFromClient = (Array.isArray(clientOnly) && (clientOnly as unknown[]).length)
+    ? (clientOnly as string[])
+    : null;
+  const onlyFromRoute = route.only?.length
+    ? route.only
+    : (route.order?.length ? route.order : (route.provider ? [route.provider] : null));
+  const finalOnly = onlyFromClient ?? onlyFromRoute;
+
+  const orderFromClient = (Array.isArray(clientOrder) && (clientOrder as unknown[]).length)
+    ? (clientOrder as string[])
+    : null;
+  const orderFromRoute = route.order?.length ? route.order : null;
+  const finalOrder = orderFromClient ?? orderFromRoute;
+
+  if (finalOrder) out.order = [...finalOrder];
+  if (finalOnly) out.only = [...finalOnly];
+  // Client may explicitly opt back into fallbacks (rare); otherwise force off.
+  out.allow_fallbacks = clientAllowFallbacks === true ? true : false;
   return out;
 }
 
@@ -3819,7 +3861,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       if (friendModel !== selectedModel) {
         req.log.info({ original: selectedModel, normalized: friendModel }, "friend proxy model prefix normalized");
       }
-      const result = await handleFriendProxy({ req, res, backend, model: friendModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, extraParams, startTime, captureResponseFn });
+      const result = await handleFriendProxy({ req, res, backend, model: friendModel, routingModel: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, extraParams, startTime, captureResponseFn });
       // ✅ Success — store cache entry first so waiters can read it, then unblock them
       setHealth(backend.url, true);
       if (responseCacheKey && capturedNonStreamResponse !== null) {
@@ -6244,12 +6286,18 @@ function extractCacheTokens(usage: Record<string, unknown> | null | undefined): 
 }
 
 async function handleFriendProxy({
-  req, res, backend, model, messages, stream, maxTokens, tools, toolChoice, extraParams, startTime, captureResponseFn,
+  req, res, backend, model, routingModel, messages, stream, maxTokens, tools, toolChoice, extraParams, startTime, captureResponseFn,
 }: {
   req: Request;
   res: Response;
   backend: Extract<Backend, { kind: "friend" }>;
+  /** Wire model id sent to the sub-node (after normalisation). */
   model: string;
+  /** Original model id (with absolute-routing prefix, if any) used SOLELY
+   *  for absolute-routing detection. When omitted, falls back to `model`.
+   *  Required when `model` was rewritten by `normalizeFriendModel` so the
+   *  prefix → provider lock can still be detected. */
+  routingModel?: string;
   messages: OAIMessage[];
   stream: boolean;
   maxTokens?: number;
@@ -6425,7 +6473,13 @@ async function handleFriendProxy({
     // — pin `anthropic/...` ids to amazon-bedrock so high-volume Claude
     // traffic keeps the Bedrock cache benefits.
     {
-      const route = detectAbsoluteProviderRoute(model);
+      // Use the ORIGINAL (pre-normalised) model id for prefix detection so
+      // routing-only prefixes (groq/, cerebras/, …) and alias prefixes
+      // (amazon-bedrock/, togetherai/, …) — which `normalizeFriendModel`
+      // rewrites to canonical author ids that no longer match any prefix —
+      // still get the provider lock injected on the wire.
+      const routeSrc = (typeof routingModel === "string" && routingModel) ? routingModel : model;
+      const route = detectAbsoluteProviderRoute(routeSrc);
       if (route) {
         b["provider"] = buildAbsoluteProviderBlock(route, b["provider"]);
       } else {
@@ -6582,7 +6636,7 @@ async function handleFriendProxy({
     req.log.info({
       outboundModel: b["model"],
       outboundProvider: b["provider"],
-      detectedRoute: detectAbsoluteProviderRoute(model),
+      detectedRoute: detectAbsoluteProviderRoute((typeof routingModel === "string" && routingModel) ? routingModel : model),
     }, "[OUTBOUND_DEBUG] friend-proxy request body");
 
     return b;

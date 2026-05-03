@@ -3524,79 +3524,6 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     req.log.info({ originalModel: model, resolvedModel: selectedModel }, "model route applied");
   }
 
-  // ---------------------------------------------------------------------------
-  // Native AI-integration dispatcher.
-  //
-  // For provider-prefixed models that lock to a Vertex Claude or Vertex/Google
-  // Gemini backend, bypass the friend-proxy → Replit modelfarm OpenRouter path
-  // (which silently routes claude-opus-* to AWS Bedrock regardless of the
-  // requested provider) and call Replit's native Anthropic / Gemini integration
-  // directly. The native integrations route through Vertex (msg_vrtx_* IDs) and
-  // Google respectively.
-  //
-  //   vertex/claude-*    → Anthropic integration (Vertex)
-  //   anthropic/claude-* → Anthropic integration (Vertex)
-  //   vertex/gemini-*    → Gemini integration (Google)
-  //   aistudio|google/gemini-* → Gemini integration (Google)
-  //
-  // bedrock/* and any model NOT on the supported native list (e.g.
-  // claude-haiku-4-6) fall through to the regular friend-proxy path.
-  // ---------------------------------------------------------------------------
-  const nativeRoute = routeIsNative(selectedModel);
-  if (nativeRoute) {
-    const t0Native = Date.now();
-    try {
-      const r = await handleNativeIntegration({ req, res, route: nativeRoute, body: rawBody });
-      const duration = Date.now() - t0Native;
-      const backendLabel = `native-${nativeRoute.kind}`;
-      const priceUSD = estimateCostUSD(selectedModel, r.promptTokens, r.completionTokens, r.cacheReadTokens, r.cacheWriteTokens);
-      recordCallStat(backendLabel, duration, r.promptTokens, r.completionTokens, r.ttftMs, selectedModel, r.cacheReadTokens, r.cacheWriteTokens);
-      recordCostStat(backendLabel, priceUSD);
-      pushRequestLog({
-        method: req.method, path: req.path, model: selectedModel,
-        backend: backendLabel, status: 200, duration, stream: shouldStream,
-        promptTokens: r.promptTokens, completionTokens: r.completionTokens,
-        cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens,
-        cacheTier: r.cacheTier || undefined,
-        priceUSD,
-        level: "info",
-      });
-      req.log.info({
-        model: selectedModel,
-        nativeKind: nativeRoute.kind,
-        nativeModel: nativeRoute.model,
-        durationMs: duration,
-        promptTok: r.promptTokens,
-        completionTok: r.completionTokens,
-        priceUSD,
-      }, "[native] request done via Replit AI integration (bypassed friend proxy)");
-      return;
-    } catch (err) {
-      const status = (err as Error & { status?: number }).status ?? 0;
-      const errMsg = err instanceof Error ? err.message : String(err);
-      req.log.error({ err: errMsg, status, model: selectedModel, kind: nativeRoute.kind },
-        "[native] integration call failed");
-      pushRequestLog({
-        method: req.method, path: req.path, model: selectedModel,
-        backend: `native-${nativeRoute.kind}`, status: status || 500,
-        duration: Date.now() - t0Native, stream: shouldStream,
-        level: "error", error: errMsg,
-      });
-      if (res.headersSent) {
-        if (!res.writableEnded) {
-          try {
-            res.write(`data: ${JSON.stringify({ error: { message: errMsg } })}\n\n`);
-            res.write("data: [DONE]\n\n");
-          } catch { /* ignore */ }
-          res.end();
-        }
-        return;
-      }
-      // Headers not sent yet: fall through to friend-proxy fallback below.
-      req.log.warn({ model: selectedModel }, "[native] falling back to friend-proxy path");
-    }
-  }
-
   // Claude family check — covers direct Anthropic models AND OpenRouter's anthropic/* paths.
   // Both require the conversation to end with a user message (no assistant prefill).
   const providerForModel = MODEL_PROVIDER_MAP.get(selectedModel) ?? (selectedModel.includes("/") ? "openrouter" : "openai");
@@ -3668,6 +3595,120 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   if (responseCacheKey) {
     const finish = markInflight(responseCacheKey);
     if (finish) finishInflight = finish;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Native AI-integration dispatcher (post-cache, pre-friend).
+  //
+  // For provider-prefixed models that lock to a Vertex Claude or Vertex/Google
+  // Gemini backend, bypass the friend-proxy → Replit modelfarm OpenRouter path
+  // (which silently routes claude-opus-* to AWS Bedrock regardless of the
+  // requested provider) and call Replit's native Anthropic / Gemini integration
+  // directly. The native integrations route through Vertex (msg_vrtx_* IDs) and
+  // Google respectively.
+  //
+  //   vertex/claude-*    → Anthropic integration (Vertex)
+  //   anthropic/claude-* → Anthropic integration (Vertex)
+  //   vertex/gemini-*    → Gemini integration (Google)
+  //   aistudio|google/gemini-* → Gemini integration (Google)
+  //
+  // bedrock/* and any model NOT on the supported native list (e.g.
+  // claude-haiku-4-6) fall through to the regular friend-proxy path.
+  //
+  // Cache integration: response cache HIT/inflight-dedup logic above runs
+  // before this block, so identical non-stream requests hitting cache never
+  // reach native at all. On native non-stream success we cacheSet() the
+  // returned OAI body so subsequent identical requests reuse it. Stream and
+  // error paths skip cacheSet (mirrors friend-proxy behaviour).
+  //
+  // NOTE on Anthropic prompt cache (cache_control: ephemeral):
+  // Probed against AI_INTEGRATIONS_ANTHROPIC_BASE_URL with a 2.2 K-token
+  // system block + ephemeral marker — modelfarm returned
+  // cache_creation_input_tokens=0 and cache_read_input_tokens=0 on both the
+  // initial and a repeat call. The Replit modelfarm Anthropic integration
+  // does NOT honour Anthropic prompt caching; the cache_control field is
+  // accepted silently with zero effect. Mother's own response cache (this
+  // block) is the only cache layer available on the native path.
+  // ---------------------------------------------------------------------------
+  const nativeRoute = routeIsNative(selectedModel);
+  if (nativeRoute) {
+    const t0Native = Date.now();
+    let nativeCaptured: unknown = null;
+    let origJsonForCache: ((body: unknown) => Response) | null = null;
+    if (responseCacheKey && !shouldStream) {
+      origJsonForCache = res.json.bind(res) as (body: unknown) => Response;
+      (res as Response & { json: Response["json"] }).json = ((data: unknown): Response => {
+        nativeCaptured = data;
+        return origJsonForCache!(data);
+      }) as Response["json"];
+    }
+    try {
+      const r = await handleNativeIntegration({ req, res, route: nativeRoute, body: rawBody });
+      const duration = Date.now() - t0Native;
+      const backendLabel = `native-${nativeRoute.kind}`;
+      const priceUSD = estimateCostUSD(selectedModel, r.promptTokens, r.completionTokens, r.cacheReadTokens, r.cacheWriteTokens);
+
+      // Cache successful non-stream responses (same robustness check as friend path:
+      // body must have an id and a non-empty choices array — guards against caching
+      // upstream error objects accidentally returned with 200 OK).
+      if (responseCacheKey && nativeCaptured !== null) {
+        const j = nativeCaptured as { id?: string; choices?: unknown[] };
+        if (j.id && Array.isArray(j.choices) && j.choices.length > 0) {
+          cacheSet(responseCacheKey, nativeCaptured, selectedModel);
+        }
+      }
+      finishInflight?.();
+
+      recordCallStat(backendLabel, duration, r.promptTokens, r.completionTokens, r.ttftMs, selectedModel, r.cacheReadTokens, r.cacheWriteTokens);
+      recordCostStat(backendLabel, priceUSD);
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: backendLabel, status: 200, duration, stream: shouldStream,
+        promptTokens: r.promptTokens, completionTokens: r.completionTokens,
+        cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens,
+        cacheTier: r.cacheTier || undefined,
+        priceUSD,
+        level: "info",
+      });
+      req.log.info({
+        model: selectedModel,
+        nativeKind: nativeRoute.kind,
+        nativeModel: nativeRoute.model,
+        durationMs: duration,
+        promptTok: r.promptTokens,
+        completionTok: r.completionTokens,
+        responseCached: !!(responseCacheKey && nativeCaptured),
+        priceUSD,
+      }, "[native] request done via Replit AI integration (bypassed friend proxy)");
+      return;
+    } catch (err) {
+      finishInflight?.();
+      const status = (err as Error & { status?: number }).status ?? 0;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: errMsg, status, model: selectedModel, kind: nativeRoute.kind },
+        "[native] integration call failed");
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: `native-${nativeRoute.kind}`, status: status || 500,
+        duration: Date.now() - t0Native, stream: shouldStream,
+        level: "error", error: errMsg,
+      });
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          try {
+            res.write(`data: ${JSON.stringify({ error: { message: errMsg } })}\n\n`);
+            res.write("data: [DONE]\n\n");
+          } catch { /* ignore */ }
+          res.end();
+        }
+      } else {
+        const clientStatus = (status >= 400 && status < 500) ? status : 502;
+        res.status(clientStatus).json({
+          error: { message: `Native AI integration error: ${errMsg}`, type: "native_integration_error" },
+        });
+      }
+      return;
+    }
   }
 
   // Try every available backend before giving up — with N sub-nodes we have N-1

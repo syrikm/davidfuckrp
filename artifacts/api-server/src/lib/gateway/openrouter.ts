@@ -7,6 +7,127 @@ import type {
   OpenRouterRequestBuildResult,
 } from "./types";
 
+// ─── Claude provider sanitization helpers ──────────────────────────────────
+// Per Anthropic docs (https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking)
+//   • When extended thinking is enabled, `temperature` MUST be 1.0 and
+//     `top_p`/`top_k`/`presence_penalty` are forbidden (returns 400).
+// Per Replit AI Integrations Anthropic skill (claude-opus-4-7 + Mythos)
+//   • `temperature`, `top_p`, `top_k` are deprecated on opus-4-7 and Mythos
+//     even WITHOUT thinking. Setting any to a non-default value returns 400.
+//
+// Both rules apply equally whether the request is routed through OpenRouter
+// or any of the cloud-Anthropic backends (Bedrock / Vertex / Anthropic
+// direct), so the sanitization runs unconditionally for the Claude family
+// at the OpenRouter-bridge serialization step.
+// Backend prefix matcher — handles single (`anthropic/...`) and nested
+// (`openrouter/anthropic/...`) routing prefixes. Order matters: strip
+// `openrouter/` first so the inner provider prefix is exposed.
+const CLAUDE_BACKEND_PREFIX_RE = /^(?:openrouter\/)?(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\//i;
+const CLAUDE_FAMILY_RE = /^(?:openrouter\/)?(?:(?:anthropic|bedrock|vertex|amazon|azure|aistudio)\/)?claude[-/]/i;
+// Opus 4.7-4.9 (current numbering) or Opus 5+, plus Mythos. The `(?:\D|$)`
+// boundary prevents matching past the version digit. If Anthropic ever
+// switches to two-digit minor versions (4-70+) this regex will need
+// loosening — flagged in MODEL_INVOCATION_RESEARCH.md.
+const CLAUDE_OPUS_47_PLUS_RE = /^claude-opus-4[-.](?:[7-9])(?:\D|$)|^claude-opus-(?:[5-9])|^claude-mythos/i;
+// Trailing alias suffixes that the gateway uses internally; keep stripping
+// while present so `claude-opus-4-7-thinking-max` collapses cleanly.
+const CLAUDE_TRAILING_ALIAS_RE = /[\-:](?:thinking-visible|thinking|max|xhigh|high|medium|low|minimal|none)$/i;
+
+function stripClaudeBackendPrefix(model: string): string {
+  let stripped = model.replace(CLAUDE_BACKEND_PREFIX_RE, "");
+  // Recurse once: `openrouter/anthropic/claude-...` already had `openrouter/`
+  // stripped above, but the inner `anthropic/` prefix must also go.
+  stripped = stripped.replace(CLAUDE_BACKEND_PREFIX_RE, "");
+  // Strip alias suffixes (covers both `-thinking` and `:thinking` flavors)
+  // until none remain — combos like `:thinking-max` need two passes.
+  while (CLAUDE_TRAILING_ALIAS_RE.test(stripped)) {
+    stripped = stripped.replace(CLAUDE_TRAILING_ALIAS_RE, "");
+  }
+  return stripped;
+}
+
+function isClaudeFamily(model: string | undefined): boolean {
+  if (!model) return false;
+  return CLAUDE_FAMILY_RE.test(model);
+}
+
+function isClaudeOpus47Plus(model: string | undefined): boolean {
+  if (!model) return false;
+  return CLAUDE_OPUS_47_PLUS_RE.test(stripClaudeBackendPrefix(model.toLowerCase()));
+}
+
+/**
+ * Decide whether the request body's `reasoning` field signals an active
+ * thinking/reasoning request that needs sampling-param sanitization.
+ *
+ * IMPORTANT: a body that explicitly sets `enabled: false` AND also includes
+ * `effort` or `max_tokens` is still treated as a reasoning request — the
+ * upstream (OpenRouter / Anthropic) infers thinking from any signal field,
+ * so the sanitizer must not be tricked by a stale `enabled: false`.
+ */
+function reasoningIsEnabled(reasoningField: unknown): boolean {
+  if (!reasoningField || typeof reasoningField !== "object") return false;
+  const r = reasoningField as Record<string, unknown>;
+  return (
+    r.enabled === true ||
+    typeof r.effort === "string" ||
+    typeof r.max_tokens === "number"
+  );
+}
+
+/**
+ * Strip / coerce sampling params that the Claude family rejects.
+ *
+ *   1. opus-4-7+ / Mythos:   delete temperature, top_p, top_k unconditionally.
+ *   2. Other Claude w/ reasoning: force temperature=1, delete top_p, top_k.
+ *
+ * Mutates `body` in-place and records what was removed in `removed`.
+ */
+/**
+ * Exported so `handleFriendProxy.buildBody` (routes/proxy.ts) can apply the
+ * same Claude sampling-param sanitization to bodies it constructs from
+ * scratch — those never pass through `buildOpenRouterRequest`, so without an
+ * external entry point opus-4-7 / mythos requests on the `/v1/*` hot path
+ * would still leak `temperature` / `top_p` / `top_k` and trigger upstream
+ * 400s. Single source of truth for the rule, called from two call sites.
+ */
+export function sanitizeClaudeSamplingParams(
+  body: Record<string, unknown>,
+): { applied: boolean; removed: string[]; reason?: string } {
+  const model = typeof body.model === "string" ? body.model : "";
+  if (!isClaudeFamily(model)) return { applied: false, removed: [] };
+
+  const removed: string[] = [];
+
+  if (isClaudeOpus47Plus(model)) {
+    for (const key of ["temperature", "top_p", "top_k", "presence_penalty"] as const) {
+      if (body[key] !== undefined) {
+        delete body[key];
+        removed.push(key);
+      }
+    }
+    return { applied: true, removed, reason: "claude-opus-4-7+/mythos: sampling params deprecated" };
+  }
+
+  if (reasoningIsEnabled(body.reasoning)) {
+    if (body.temperature !== undefined && body.temperature !== 1) {
+      body.temperature = 1;
+      removed.push("temperature→1");
+    }
+    for (const key of ["top_p", "top_k", "presence_penalty"] as const) {
+      if (body[key] !== undefined) {
+        delete body[key];
+        removed.push(key);
+      }
+    }
+    if (removed.length > 0) {
+      return { applied: true, removed, reason: "claude+thinking: incompatible sampling params stripped" };
+    }
+  }
+
+  return { applied: false, removed: [] };
+}
+
 function partToOpenAICompatible(part: GatewayPart): Record<string, unknown> {
   if (part.type === "text" || part.type === "input_text") {
     return { type: "text", text: part.text };
@@ -154,6 +275,16 @@ function buildReasoning(ir: GatewayRequestIR): Record<string, unknown> | undefin
   if (!ir.reasoning) return undefined;
 
   const reasoning: Record<string, unknown> = {};
+
+  // Pass `effort` through verbatim — OpenRouter normalizes unknown effort
+  // values to the nearest supported level per its docs:
+  //   "If a model doesn't support a specific effort level (for example, if a
+  //    model only supports `low` and `high`), OpenRouter will map your
+  //    requested effort to the nearest supported level."
+  // The documented enum is { minimal | low | medium | high | xhigh | none }
+  // but OR's fuzzy-mapping layer means non-enum tokens (e.g. "max") are
+  // safe to forward — and several upstreams accept model-specific synonyms
+  // we don't want to flatten here.
   if (ir.reasoning.effort) reasoning.effort = ir.reasoning.effort;
   if (typeof ir.reasoning.maxTokens === "number") reasoning.max_tokens = ir.reasoning.maxTokens;
   if (typeof ir.reasoning.exclude === "boolean") reasoning.exclude = ir.reasoning.exclude;
@@ -243,6 +374,12 @@ export function buildOpenRouterRequest(ir: GatewayRequestIR): OpenRouterRequestB
     preservedKeys.push(key);
   }
 
+  // Final pass: strip / coerce sampling params that the Claude family rejects.
+  // This MUST run after `unknownFields` are spread (in case top_k / top_p
+  // sneaked in via that route) and is the last line of defence before the
+  // payload reaches the upstream provider.
+  const sanitization = sanitizeClaudeSamplingParams(body);
+
   return {
     body,
     summary: {
@@ -260,6 +397,9 @@ export function buildOpenRouterRequest(ir: GatewayRequestIR): OpenRouterRequestB
       providerRoute: ir.modelResolution?.providerRoute,
       cache: ir.cache,
       preservedKeys,
+      claudeSanitization: sanitization.applied
+        ? { removed: sanitization.removed, reason: sanitization.reason }
+        : undefined,
     },
   };
 }

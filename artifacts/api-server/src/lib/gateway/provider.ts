@@ -37,8 +37,17 @@ interface GatewayProviderPrefixSpec {
  *
  * Two kinds of entries coexist:
  *
- * 1. **Provider locks** (have `provider` field) — force `provider.only` +
+ * 1. **Provider locks** (have `provider` field) — force `provider.order` +
  *    `allow_fallbacks:false`.
+ *    NOTE: We deliberately use `order` (not `only`).  Per OpenRouter docs
+ *    (https://openrouter.ai/docs/features/provider-routing#allowing-only-specific-providers):
+ *    "when you allow providers for a specific request, the list of allowed
+ *    providers is **merged with your account-wide allowed providers**".
+ *    `only` is union-merged with the upstream account's allow list — if the
+ *    account allows `amazon-bedrock`, `only:["google-vertex"]` does NOT
+ *    exclude Bedrock.  `order` + `allow_fallbacks:false` is the documented
+ *    correct way to lock a single provider; `order` is a strict priority
+ *    and is not merged with account settings.
  * 2. **Vendor-only namespaces** (no `provider` field) — recognised so the
  *    prefix is stripped during canonicalisation, but no lock is injected.
  *    Used for model ids like `meta-llama/llama-3.3` and `qwen/qwen-2.5`
@@ -55,21 +64,18 @@ const PROVIDER_PREFIX_SPECS: GatewayProviderPrefixSpec[] = [
     aliases: ["bedrock", "amazon-bedrock"],
     provider: "amazon-bedrock",
     order: ["amazon-bedrock"],
-    only: ["amazon-bedrock"],
     allowFallbacks: false,
   },
   {
     aliases: ["vertex", "google-vertex", "anthropic-vertex"],
     provider: "google-vertex",
     order: ["google-vertex"],
-    only: ["google-vertex"],
     allowFallbacks: false,
   },
   {
     aliases: ["anthropic", "anthropic-direct"],
     provider: "anthropic",
     order: ["anthropic"],
-    only: ["anthropic"],
     allowFallbacks: false,
   },
 
@@ -80,14 +86,12 @@ const PROVIDER_PREFIX_SPECS: GatewayProviderPrefixSpec[] = [
     aliases: ["aistudio", "ai-studio", "google-ai-studio"],
     provider: "google-ai-studio",
     order: ["google-ai-studio"],
-    only: ["google-ai-studio"],
     allowFallbacks: false,
   },
   {
     aliases: ["google"],
     provider: "google-vertex",
     order: ["google-vertex"],
-    only: ["google-vertex"],
     allowFallbacks: false,
   },
 
@@ -96,56 +100,48 @@ const PROVIDER_PREFIX_SPECS: GatewayProviderPrefixSpec[] = [
     aliases: ["openai", "openai-direct"],
     provider: "openai",
     order: ["openai"],
-    only: ["openai"],
     allowFallbacks: false,
   },
   {
     aliases: ["x-ai", "xai"],
     provider: "x-ai",
     order: ["x-ai"],
-    only: ["x-ai"],
     allowFallbacks: false,
   },
   {
     aliases: ["deepseek", "deepseek-direct"],
     provider: "deepseek",
     order: ["deepseek"],
-    only: ["deepseek"],
     allowFallbacks: false,
   },
   {
     aliases: ["mistral", "mistralai"],
     provider: "mistral",
     order: ["mistral"],
-    only: ["mistral"],
     allowFallbacks: false,
   },
   {
     aliases: ["cohere"],
     provider: "cohere",
     order: ["cohere"],
-    only: ["cohere"],
     allowFallbacks: false,
   },
   {
     aliases: ["perplexity"],
     provider: "perplexity",
     order: ["perplexity"],
-    only: ["perplexity"],
     allowFallbacks: false,
   },
   {
     aliases: ["moonshotai", "moonshot"],
     provider: "moonshotai",
     order: ["moonshotai"],
-    only: ["moonshotai"],
     allowFallbacks: false,
   },
   {
     aliases: ["z-ai", "zai"],
     provider: "z-ai",
     order: ["z-ai"],
-    only: ["z-ai"],
     allowFallbacks: false,
   },
 
@@ -154,133 +150,114 @@ const PROVIDER_PREFIX_SPECS: GatewayProviderPrefixSpec[] = [
     aliases: ["groq"],
     provider: "groq",
     order: ["groq"],
-    only: ["groq"],
     allowFallbacks: false,
   },
   {
     aliases: ["cerebras"],
     provider: "cerebras",
     order: ["cerebras"],
-    only: ["cerebras"],
     allowFallbacks: false,
   },
   {
     aliases: ["sambanova"],
     provider: "sambanova",
     order: ["sambanova"],
-    only: ["sambanova"],
     allowFallbacks: false,
   },
   {
     aliases: ["fireworks", "fireworks-ai"],
     provider: "fireworks",
     order: ["fireworks"],
-    only: ["fireworks"],
     allowFallbacks: false,
   },
   {
     aliases: ["together", "togetherai"],
     provider: "together",
     order: ["together"],
-    only: ["together"],
     allowFallbacks: false,
   },
   {
     aliases: ["deepinfra"],
     provider: "deepinfra",
     order: ["deepinfra"],
-    only: ["deepinfra"],
     allowFallbacks: false,
   },
   {
     aliases: ["novita", "novitaai"],
     provider: "novita",
     order: ["novita"],
-    only: ["novita"],
     allowFallbacks: false,
   },
   {
     aliases: ["hyperbolic"],
     provider: "hyperbolic",
     order: ["hyperbolic"],
-    only: ["hyperbolic"],
     allowFallbacks: false,
   },
   {
     aliases: ["lambda"],
     provider: "lambda",
     order: ["lambda"],
-    only: ["lambda"],
     allowFallbacks: false,
   },
   {
     aliases: ["cloudflare"],
     provider: "cloudflare",
     order: ["cloudflare"],
-    only: ["cloudflare"],
     allowFallbacks: false,
   },
   {
     aliases: ["friendli"],
     provider: "friendli",
     order: ["friendli"],
-    only: ["friendli"],
     allowFallbacks: false,
   },
   {
     aliases: ["featherless"],
     provider: "featherless",
     order: ["featherless"],
-    only: ["featherless"],
     allowFallbacks: false,
   },
   {
     aliases: ["mancer"],
     provider: "mancer",
     order: ["mancer"],
-    only: ["mancer"],
     allowFallbacks: false,
   },
   {
     aliases: ["parasail"],
     provider: "parasail",
     order: ["parasail"],
-    only: ["parasail"],
     allowFallbacks: false,
   },
   {
     aliases: ["baseten"],
     provider: "baseten",
     order: ["baseten"],
-    only: ["baseten"],
     allowFallbacks: false,
   },
   {
     aliases: ["replicate"],
     provider: "replicate",
     order: ["replicate"],
-    only: ["replicate"],
     allowFallbacks: false,
   },
   {
     aliases: ["nebius"],
     provider: "nebius",
     order: ["nebius"],
-    only: ["nebius"],
     allowFallbacks: false,
   },
   {
     aliases: ["chutes"],
     provider: "chutes",
     order: ["chutes"],
-    only: ["chutes"],
     allowFallbacks: false,
   },
   {
     aliases: ["azure", "azure-openai"],
     provider: "azure",
     order: ["azure"],
-    only: ["azure"],
     allowFallbacks: false,
   },
 
@@ -291,28 +268,24 @@ const PROVIDER_PREFIX_SPECS: GatewayProviderPrefixSpec[] = [
     aliases: ["nvidia"],
     provider: "nvidia",
     order: ["nvidia"],
-    only: ["nvidia"],
     allowFallbacks: false,
   },
   {
     aliases: ["minimax"],
     provider: "minimax",
     order: ["minimax"],
-    only: ["minimax"],
     allowFallbacks: false,
   },
   {
     aliases: ["alibaba", "alibaba-cloud"],
     provider: "alibaba",
     order: ["alibaba"],
-    only: ["alibaba"],
     allowFallbacks: false,
   },
   {
     aliases: ["baidu", "baidu-qianfan"],
     provider: "baidu",
     order: ["baidu"],
-    only: ["baidu"],
     allowFallbacks: false,
   },
 
@@ -346,7 +319,7 @@ function normalizePath(raw: string): string {
 // canonicalizeLogicalModel
 // ---------------------------------------------------------------------------
 // 重要架构假设（V1.1.9）：本 gateway 当前所有出站流量都通过 Friend Proxy →
-// OpenRouter（见 replit.md "后端路由"）。OpenRouter 的 Claude 模型 ID 使用
+// OpenRouter（见项目 README "后端路由"段）。OpenRouter 的 Claude 模型 ID 使用
 // **dot 形式 + 不带日期/版本后缀**，例如：
 //   - anthropic/claude-3.7-sonnet     （3.x：数字在 sonnet/opus/haiku 之前）
 //   - anthropic/claude-sonnet-4       （4.0 整数版）

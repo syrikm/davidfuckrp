@@ -1,7 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
+import { motion, LayoutGroup } from "framer-motion";
 import SetupWizard from "./components/SetupWizard";
 import PageLogs from "./components/PageLogs";
 import PageDocs from "./components/PageDocs";
+import PagePlayground from "./components/PagePlayground";
+
+const APP_VERSION = "v1.1.9";
 
 // ---------------------------------------------------------------------------
 // Model registry
@@ -495,7 +499,7 @@ function normalizeBackendUrl(raw: string): string {
 // Page components
 // ---------------------------------------------------------------------------
 
-type Tab = "dashboard" | "cluster" | "models" | "tutorial" | "settings" | "system";
+type Tab = "dashboard" | "cluster" | "models" | "playground" | "tutorial" | "settings" | "system";
 
 function PageDashboard({
   displayUrl,
@@ -2000,6 +2004,7 @@ export default function App() {
     { id: "dashboard", label: "Dashboard", icon: "&#127968;" },
     { id: "cluster", label: "Cluster", icon: "&#128200;" },
     { id: "models", label: "Models", icon: "&#129302;" },
+    { id: "playground", label: "Playground", icon: "&#128172;" },
     { id: "tutorial", label: "Tutorial", icon: "&#128214;" },
     { id: "settings", label: "Settings", icon: "&#9881;" },
     { id: "system", label: "System", icon: "&#128736;" },
@@ -2025,100 +2030,218 @@ export default function App() {
         />
       )}
 
-      <div style={{ maxWidth: "920px", margin: "0 auto", padding: "28px 24px 80px" }}>
-        <div
+      <div style={{ maxWidth: "960px", margin: "0 auto", padding: "24px 24px 80px" }}>
+        {/* ─── Header ──────────────────────────────────────────────── */}
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, ease: "easeOut" }}
           style={{
-            marginBottom: "24px",
-            background: "linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(139,92,246,0.06) 50%, rgba(59,130,246,0.04) 100%)",
-            border: "1px solid rgba(99,102,241,0.12)",
-            borderRadius: "16px",
-            padding: "24px 28px",
+            marginBottom: "20px",
+            background: "linear-gradient(135deg, rgba(99,102,241,0.10) 0%, rgba(139,92,246,0.07) 50%, rgba(59,130,246,0.05) 100%)",
+            border: "1px solid rgba(99,102,241,0.18)",
+            borderRadius: "18px",
+            padding: "20px 24px",
+            backdropFilter: "blur(10px) saturate(140%)",
+            WebkitBackdropFilter: "blur(10px) saturate(140%)",
+            boxShadow: "0 8px 32px -16px rgba(99,102,241,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "14px", marginBottom: "10px" }}>
-            <div
+          <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+            <motion.div
+              whileHover={{ scale: 1.05, rotate: 5 }}
+              transition={{ type: "spring", stiffness: 300 }}
               style={{
-                width: "44px",
-                height: "44px",
-                borderRadius: "12px",
+                width: "46px",
+                height: "46px",
+                borderRadius: "13px",
                 background: "linear-gradient(135deg, #6366f1, #8b5cf6, #3b82f6)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 fontSize: "22px",
-                boxShadow: "0 4px 16px rgba(99,102,241,0.3)",
+                boxShadow: "0 6px 24px -4px rgba(99,102,241,0.55), inset 0 1px 0 rgba(255,255,255,0.2)",
+                position: "relative",
+                cursor: "pointer",
+                flexShrink: 0,
               }}
             >
-              ⚡
+              <span style={{ filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.3))" }}>⚡</span>
+            </motion.div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
+                <h1 style={{ margin: 0, fontSize: "23px", fontWeight: 700, color: "#f1f5f9", letterSpacing: "-0.025em" }}>
+                  Replit2Api
+                </h1>
+                <span
+                  style={{
+                    fontSize: "10px",
+                    color: "#a5b4fc",
+                    background: "rgba(99,102,241,0.15)",
+                    border: "1px solid rgba(99,102,241,0.3)",
+                    borderRadius: "100px",
+                    padding: "1px 7px",
+                    fontWeight: 700,
+                    letterSpacing: "0.04em",
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                >
+                  {APP_VERSION}
+                </span>
+              </div>
+              <p style={{ color: "#64748b", margin: "3px 0 0", fontSize: "12.5px", lineHeight: 1.4 }}>
+                AI Proxy Gateway <span style={{ color: "#475569" }}>·</span> OpenAI <span style={{ color: "#475569" }}>·</span> Anthropic <span style={{ color: "#475569" }}>·</span> Gemini <span style={{ color: "#475569" }}>·</span> OpenRouter
+              </p>
             </div>
-            <div>
-              <h1 style={{ margin: 0, fontSize: "22px", fontWeight: 700, color: "#f1f5f9", letterSpacing: "-0.02em" }}>Replit2Api</h1>
-              <p style={{ color: "#64748b", margin: "2px 0 0", fontSize: "12.5px" }}>AI Proxy Gateway · OpenAI / Anthropic / Gemini / OpenRouter</p>
-            </div>
-            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <button
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end", flexShrink: 0 }}>
+              <motion.button
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.97 }}
                 onClick={() => setShowWizard(true)}
                 style={{
                   padding: "6px 14px",
-                  background: "linear-gradient(135deg, rgba(99,102,241,0.2), rgba(139,92,246,0.15))",
-                  border: "1px solid rgba(99,102,241,0.3)",
+                  background: "linear-gradient(135deg, rgba(99,102,241,0.25), rgba(139,92,246,0.18))",
+                  border: "1px solid rgba(99,102,241,0.35)",
                   borderRadius: "100px",
-                  color: "#a5b4fc",
+                  color: "#c7d2fe",
                   fontSize: "12px",
                   fontWeight: 600,
                   cursor: "pointer",
                   display: "flex",
                   alignItems: "center",
                   gap: "5px",
+                  boxShadow: "0 2px 8px -2px rgba(99,102,241,0.3)",
                 }}
               >
                 🚀 配置向导
-              </button>
+              </motion.button>
               <div
                 style={{
                   display: "flex",
                   alignItems: "center",
                   gap: "6px",
-                  background: online === null ? "rgba(100,116,139,0.15)" : online ? "rgba(74,222,128,0.1)" : "rgba(248,113,113,0.1)",
-                  border: `1px solid ${online === null ? "rgba(100,116,139,0.3)" : online ? "rgba(74,222,128,0.25)" : "rgba(248,113,113,0.25)"}`,
+                  background:
+                    online === null
+                      ? "rgba(100,116,139,0.15)"
+                      : online
+                        ? "rgba(74,222,128,0.12)"
+                        : "rgba(248,113,113,0.12)",
+                  border: `1px solid ${
+                    online === null
+                      ? "rgba(100,116,139,0.3)"
+                      : online
+                        ? "rgba(74,222,128,0.3)"
+                        : "rgba(248,113,113,0.3)"
+                  }`,
                   borderRadius: "100px",
-                  padding: "5px 12px 5px 8px",
+                  padding: "5px 12px 5px 9px",
                 }}
               >
-                <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: online === null ? "#64748b" : online ? "#4ade80" : "#f87171" }} />
+                <motion.div
+                  animate={online ? { scale: [1, 1.3, 1], opacity: [1, 0.7, 1] } : {}}
+                  transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    background: online === null ? "#64748b" : online ? "#4ade80" : "#f87171",
+                    boxShadow: online ? "0 0 8px #4ade80" : undefined,
+                  }}
+                />
                 <span style={{ fontSize: "12px", color: online === null ? "#64748b" : online ? "#4ade80" : "#f87171", fontWeight: 600 }}>
                   {online === null ? "..." : online ? "在线" : "离线"}
                 </span>
               </div>
             </div>
           </div>
-        </div>
+        </motion.div>
 
-        <div style={{ display: "flex", gap: "2px", marginBottom: "24px", background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "12px", padding: "4px", backdropFilter: "blur(8px)" }}>
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
+        {/* ─── Tab bar (centered floating pill, sticky) ─────────────── */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            marginBottom: "24px",
+            position: "sticky",
+            top: "12px",
+            zIndex: 50,
+          }}
+        >
+          <LayoutGroup id="tabs">
+            <div
               style={{
-                flex: 1,
-                padding: "9px 8px",
-                borderRadius: "8px",
-                border: "none",
-                background: tab === t.id ? "linear-gradient(135deg, rgba(99,102,241,0.25), rgba(139,92,246,0.2))" : "transparent",
-                color: tab === t.id ? "#c7d2fe" : "#475569",
-                fontSize: "12.5px",
-                fontWeight: tab === t.id ? 600 : 400,
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "5px",
+                display: "inline-flex",
+                gap: "2px",
+                background: "rgba(15,23,42,0.7)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                borderRadius: "100px",
+                padding: "5px",
+                backdropFilter: "blur(14px) saturate(160%)",
+                WebkitBackdropFilter: "blur(14px) saturate(160%)",
+                boxShadow:
+                  "0 12px 36px -12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.04)",
+                maxWidth: "100%",
+                overflowX: "auto",
+                scrollbarWidth: "none",
               }}
             >
-              <span dangerouslySetInnerHTML={{ __html: t.icon }} style={{ fontSize: "13px" }} />
-              {t.label}
-            </button>
-          ))}
+              {TABS.map((t) => {
+                const active = tab === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => setTab(t.id)}
+                    style={{
+                      position: "relative",
+                      padding: "8px 16px",
+                      borderRadius: "100px",
+                      border: "none",
+                      background: "transparent",
+                      color: active ? "#f1f5f9" : "#64748b",
+                      fontSize: "12.5px",
+                      fontWeight: active ? 600 : 500,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      transition: "color 0.2s",
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!active) e.currentTarget.style.color = "#cbd5e1";
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!active) e.currentTarget.style.color = "#64748b";
+                    }}
+                  >
+                    {active && (
+                      <motion.div
+                        layoutId="tab-pill"
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          background:
+                            "linear-gradient(135deg, rgba(99,102,241,0.4), rgba(139,92,246,0.3))",
+                          borderRadius: "100px",
+                          border: "1px solid rgba(99,102,241,0.45)",
+                          boxShadow:
+                            "0 4px 16px -4px rgba(99,102,241,0.55), inset 0 1px 0 rgba(255,255,255,0.1)",
+                          zIndex: 0,
+                        }}
+                        transition={{ type: "spring", stiffness: 380, damping: 32 }}
+                      />
+                    )}
+                    <span
+                      dangerouslySetInnerHTML={{ __html: t.icon }}
+                      style={{ fontSize: "13px", position: "relative", zIndex: 1 }}
+                    />
+                    <span style={{ position: "relative", zIndex: 1 }}>{t.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </LayoutGroup>
         </div>
 
         {tab === "dashboard" && <PageDashboard displayUrl={displayUrl} online={online} totalModels={totalModels} stats={stats} onNavigate={setTab} />}
@@ -2156,6 +2279,8 @@ export default function App() {
             onToggleModel={toggleModelById}
           />
         )}
+
+        {tab === "playground" && <PagePlayground baseUrl={baseUrl} apiKey={apiKey} />}
 
         {tab === "tutorial" && (
           <PageTutorial

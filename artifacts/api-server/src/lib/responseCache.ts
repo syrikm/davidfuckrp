@@ -30,48 +30,20 @@ const GC_INTERVAL_MS = 10 * 60 * 1_000; // 10 minutes
 
 // ---------------------------------------------------------------------------
 // Shard-based partitioned cache
-// Each shard has its own Map and mutex lock, eliminating contention.
+//
+// Node.js is single-threaded: all synchronous cache operations (get, set,
+// delete, iterate) run without interleaving, so no mutex is needed for
+// in-memory Map operations. Sharding is kept purely to reduce peak Map-resize
+// pauses and to scope iteration (GC, disk snapshot) to a single shard rather
+// than one giant Map. The previous ShardMutex / statsMutex implementations
+// were dead code (acquired but never serialised any awaitable cross-shard
+// section); removed in alignment with upstream vcpfuckcachefork@3ec0e18.
 // ---------------------------------------------------------------------------
 
 const SHARD_COUNT = 16;
 
-class ShardMutex {
-  private _queue: Array<() => void> = [];
-  private _locked = false;
-
-  async acquire(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      if (!this._locked) {
-        this._locked = true;
-        resolve();
-      } else {
-        this._queue.push(resolve);
-      }
-    });
-  }
-
-  release(): void {
-    if (this._queue.length > 0) {
-      const next = this._queue.shift()!;
-      next();
-    } else {
-      this._locked = false;
-    }
-  }
-
-  async run<T>(fn: () => T): Promise<T> {
-    await this.acquire();
-    try {
-      return fn();
-    } finally {
-      this.release();
-    }
-  }
-}
-
 interface CacheShard {
   map: Map<string, CacheEntry>;
-  mutex: ShardMutex;
 }
 
 function shardIndex(key: string): number {
@@ -85,17 +57,15 @@ function shardIndex(key: string): number {
 
 const shards: CacheShard[] = Array.from({ length: SHARD_COUNT }, () => ({
   map: new Map(),
-  mutex: new ShardMutex(),
 }));
 
 function getShard(key: string): CacheShard {
   return shards[shardIndex(key)];
 }
 
-// Global stats aggregation
+// Global stats — updated synchronously, no lock needed (single-threaded Node.js).
 let hits = 0;
 let misses = 0;
-const statsMutex = new ShardMutex();
 
 let ttlMs = DEFAULT_TTL_MS;
 let maxEntries = DEFAULT_MAX_ENTRIES;
@@ -118,7 +88,7 @@ let enabled = true;
 //     point of the disk dump is fast warm-restart on the *same* host, which
 //     local fs already provides on every supported deployment target
 //     (including ephemeral cloud — the cache simply rebuilds).
-//   * The legacy plan (脱离-replit-平台总规划.md) listed `.cache/` among
+//   * The legacy platform-decoupling plan listed `.cache/` among
 //     "process.cwd() writes" but that was a structural inventory; caches are
 //     explicitly excluded from the storage-adapter migration.
 //

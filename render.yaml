@@ -1,0 +1,50 @@
+# Render Blueprint — one-click deploy via "New Blueprint" in the Render UI.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Default = FREE plan (sleeps after 15 min idle, ~30s cold start, 512 MB RAM).
+# Free plan does NOT support persistent disks, so storage is ephemeral by default.
+# For persistence on free plan: set STORAGE_BACKEND=s3 and the S3_* secrets
+# (Cloudflare R2 free tier works great — 10 GB + 1M writes/mo).
+#
+# To upgrade to paid Starter ($7/mo, always-on, supports disks):
+#   1. Change plan: free → plan: starter
+#   2. Uncomment the `disk:` block below
+services:
+  - type: web
+    name: davidfuckrp
+    runtime: docker
+    plan: free
+    region: singapore    # change to oregon / frankfurt / ohio if you prefer
+    branch: deploy/render
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/healthz
+    autoDeploy: true
+    # Free plan does not support disks. Uncomment after upgrading to Starter+:
+    # disk:
+    #   name: data
+    #   mountPath: /app/data
+    #   sizeGB: 1
+    envVars:
+      - key: PROXY_API_KEY
+        sync: false        # prompts user to fill in via Render UI
+      - key: STORAGE_BACKEND
+        value: local       # change to "s3" for persistence on free plan
+      - key: PORT
+        value: "8080"
+      - key: NODE_ENV
+        value: production
+      # Optional — uncomment & sync via Render UI when you have them
+      # - key: OPENROUTER_API_KEY
+      #   sync: false
+      # S3 / R2 / B2 credentials (required when STORAGE_BACKEND=s3 or =r2)
+      # NOTE: env var prefix is STORAGE_S3_*, not S3_*
+      # - key: STORAGE_S3_BUCKET
+      #   sync: false
+      # - key: STORAGE_S3_ENDPOINT
+      #   sync: false
+      # - key: STORAGE_S3_ACCESS_KEY_ID
+      #   sync: false
+      # - key: STORAGE_S3_SECRET_ACCESS_KEY
+      #   sync: false
+      # - key: STORAGE_S3_REGION
+      #   value: auto         # default — works for R2; set real region for AWS

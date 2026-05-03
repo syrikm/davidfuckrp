@@ -19,6 +19,7 @@ import {
   type HotUpdateConfig,
 } from "../lib/hotUpdater";
 import { logger } from "../lib/logger";
+import { gatewayConfig } from "../lib/gatewayConfig";
 
 const router: IRouter = Router();
 const execFileAsync = promisify(execFile);
@@ -30,12 +31,20 @@ const execFileAsync = promisify(execFile);
 const WORKSPACE_ROOT = resolve(process.cwd(), "../../");
 
 // ---------------------------------------------------------------------------
-// GitHub config
+// GitHub config — sourced from gatewayConfig.updateRepo (env GATEWAY_UPDATE_REPO)
 // ---------------------------------------------------------------------------
 
-const GITHUB_OWNER = "Akatsuki03";
-const GITHUB_REPO = "Replit2Api";
-const GITHUB_BRANCH = "main";
+const [GITHUB_OWNER, GITHUB_REPO] = (() => {
+  const slug = gatewayConfig.updateRepo;
+  const idx = slug.indexOf("/");
+  if (idx <= 0 || idx === slug.length - 1) {
+    throw new Error(
+      `Invalid GATEWAY_UPDATE_REPO="${slug}" — expected "owner/repo" format`,
+    );
+  }
+  return [slug.slice(0, idx), slug.slice(idx + 1)];
+})();
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH ?? "main";
 const GITHUB_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}`;
 export const GITHUB_RAW_VERSION_URL =
   `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/version.json`;
@@ -48,7 +57,7 @@ export function safeVersionHeader(version: string): string {
 function githubHeaders(withToken = true): Record<string, string> {
   const h: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "Replit2Api-Updater",
+    "User-Agent": `${gatewayConfig.brand}-Updater`,
   };
   const tok = process.env.GITHUB_TOKEN;
   if (withToken && tok) h.Authorization = `token ${tok}`;
@@ -267,7 +276,7 @@ router.get("/update/version", async (_req: Request, res: Response) => {
       latestVersion: remote.version,
       latestReleaseNotes: remote.releaseNotes,
       latestReleaseDate: remote.releaseDate,
-      source: isGitHubCheckUrl(checkUrl) ? "github" : "replit",
+      source: isGitHubCheckUrl(checkUrl) ? "github" : "bundle",
     });
   } catch (err) {
     res.json({ ...local, hasUpdate: false, checkError: err instanceof Error ? err.message : "check failed" });
@@ -347,10 +356,10 @@ router.post("/update/apply", async (req: Request, res: Response) => {
 
   res.json({
     status: "started",
-    source: useGitHub ? "github" : "replit",
+    source: useGitHub ? "github" : "bundle",
     message: useGitHub
       ? "Pulling latest code from GitHub, server will restart automatically in ~30-60s..."
-      : "Downloading update bundle from upstream Replit instance, server will restart in ~30s...",
+      : "Downloading update bundle from upstream gateway instance, server will restart in ~30s...",
   });
   updateInProgress = true;
 
@@ -372,7 +381,7 @@ router.post("/update/apply", async (req: Request, res: Response) => {
 
         logger.info({ writtenFiles: result.writtenFiles }, "[update] Hot update completed, installing dependencies...");
       } else {
-        // Legacy Replit bundle mode
+        // Legacy bundle mode (peer gateway instance acting as update source)
         const bundleUrl = checkUrl!.replace(/\/update\/version$/, "/update/bundle");
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 30000);
@@ -385,7 +394,7 @@ router.post("/update/apply", async (req: Request, res: Response) => {
           mkdirSync(dirname(fullPath), { recursive: true });
           writeFileSync(fullPath, content, "utf8");
         }
-        console.log(`[update] wrote ${Object.keys(bundle.files).length} files from Replit bundle`);
+        console.log(`[update] wrote ${Object.keys(bundle.files).length} files from peer bundle`);
       }
 
       // Install dependencies

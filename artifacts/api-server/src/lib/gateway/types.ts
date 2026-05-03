@@ -212,6 +212,10 @@ export interface OpenRouterRequestBuildResult {
     providerRoute?: GatewayProviderRoute;
     cache?: GatewayCacheConfig;
     preservedKeys: string[];
+    claudeSanitization?: {
+      removed: string[];
+      reason?: string;
+    };
   };
 }
 

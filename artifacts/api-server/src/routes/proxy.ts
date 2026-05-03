@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Router, type IRouter, type NextFunction, type Request, type Response } from "express";
 import { readJson, writeJson } from "../lib/cloudPersist";
+import { gatewayConfig, gatewayTimeoutOverrides } from "../lib/gatewayConfig";
 import {
   deleteManualModelStoreEntry,
   readManualModelStore,
@@ -74,9 +75,11 @@ import {
   executeGatewayRequest,
   listAbsoluteProviderPrefixAliases,
   normalizeGatewayRequest,
+  sanitizeClaudeSamplingParams,
   summarizeIR,
 } from "../lib/gateway";
 import type { GatewayProviderRoute } from "../lib/gateway";
+import { routeIsNative, handleNativeIntegration } from "../lib/native-integrations";
 
 // TS compatibility shim for this artifact build target.
 declare const fetch: any;
@@ -1312,6 +1315,10 @@ interface Backend {
   providerSlugs?: string[];
 }
 
+// Platform-tied timeouts (legBWallMs, subNodeStreamWallMs, keepaliveJobMs,
+// keepaliveAnthropicMs, keepaliveClientMs) are sourced from gatewayConfig so
+// operators on platforms without Replit's 300s/600s reverse-proxy cuts can
+// override them via env vars. Defaults preserve the original behaviour.
 const GATEWAY_TIMEOUTS = {
   upstreamLongPollMs: 3_600_000,        // true task lifetime: allow up to 1h model execution
   upstreamModelListMs: 20_000,
@@ -1321,14 +1328,14 @@ const GATEWAY_TIMEOUTS = {
   upstreamPassthroughMs: 90_000,
   subNodeJobSubmitMs: 15_000,
   subNodeJobCancelMs: 5_000,
-  subNodeStreamWallMs: 270_000,         // single upstream stream connection rotation window
+  subNodeStreamWallMs: gatewayTimeoutOverrides.subNodeStreamWallMs,  // upstream stream rotation window — fires before platform outgoing cut
   streamIdleMs: 900_000,                // upstream idle watchdog, not task lifetime
   streamReconnectDelayMs: 300,
   streamRecoverDelayMs: 500,
-  legBWallMs: 570_000,                  // client-facing reconnect window before Replit hard cut
-  keepaliveClientMs: 5_000,
-  keepaliveAnthropicMs: 10_000,
-  keepaliveJobMs: 200_000,
+  legBWallMs: gatewayTimeoutOverrides.legBWallMs,                    // client-facing reconnect window — fires before platform incoming cut
+  keepaliveClientMs: gatewayTimeoutOverrides.keepaliveClientMs,
+  keepaliveAnthropicMs: gatewayTimeoutOverrides.keepaliveAnthropicMs,
+  keepaliveJobMs: gatewayTimeoutOverrides.keepaliveJobMs,            // SSE heartbeat — must be below platform idle cut
   liveJobTtlMs: 45 * 60_000,            // resumable live-job TTL
   liveJobGcIntervalMs: 5 * 60_000,
   videoJobTtlMs: 6 * 3_600_000,
@@ -1366,7 +1373,7 @@ const JOB_TTL_MS = GATEWAY_TIMEOUTS.liveJobTtlMs;
 // ---------------------------------------------------------------------------
 // Live Job Map — fingerprint → running StreamJobEntry
 // ---------------------------------------------------------------------------
-// When Replit's 600 s hard HTTP limit fires, Leg A keeps running and its
+// When the platform's hard incoming-HTTP limit fires, Leg A keeps running and its
 // chunks stay buffered here.  The next identical POST from the client matches
 // the same fingerprint → re-attaches to the existing Leg A → replays buffered
 // chunks at network speed, then receives new real-time chunks.  Zero new AI
@@ -3089,7 +3096,7 @@ router.get("/v1/models", requireApiKey, async (_req: Request, res: Response) => 
       id: result.m.id,
       object: "model",
       created: 1700000000,
-      owned_by: unified?.provider ?? "replit-proxy",
+      owned_by: unified?.provider ?? gatewayConfig.ownedBy,
       canonical_id: unified?.canonical_id ?? result.m.id,
       ...(unified?.description ?? result.m.description ? { description: unified?.description ?? result.m.description } : {}),
       registry: toRegistryPayload(unified),
@@ -3588,6 +3595,120 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   if (responseCacheKey) {
     const finish = markInflight(responseCacheKey);
     if (finish) finishInflight = finish;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Native AI-integration dispatcher (post-cache, pre-friend).
+  //
+  // For provider-prefixed models that lock to a Vertex Claude or Vertex/Google
+  // Gemini backend, bypass the friend-proxy → Replit modelfarm OpenRouter path
+  // (which silently routes claude-opus-* to AWS Bedrock regardless of the
+  // requested provider) and call Replit's native Anthropic / Gemini integration
+  // directly. The native integrations route through Vertex (msg_vrtx_* IDs) and
+  // Google respectively.
+  //
+  //   vertex/claude-*    → Anthropic integration (Vertex)
+  //   anthropic/claude-* → Anthropic integration (Vertex)
+  //   vertex/gemini-*    → Gemini integration (Google)
+  //   aistudio|google/gemini-* → Gemini integration (Google)
+  //
+  // bedrock/* and any model NOT on the supported native list (e.g.
+  // claude-haiku-4-6) fall through to the regular friend-proxy path.
+  //
+  // Cache integration: response cache HIT/inflight-dedup logic above runs
+  // before this block, so identical non-stream requests hitting cache never
+  // reach native at all. On native non-stream success we cacheSet() the
+  // returned OAI body so subsequent identical requests reuse it. Stream and
+  // error paths skip cacheSet (mirrors friend-proxy behaviour).
+  //
+  // NOTE on Anthropic prompt cache (cache_control: ephemeral):
+  // Probed against AI_INTEGRATIONS_ANTHROPIC_BASE_URL with a 2.2 K-token
+  // system block + ephemeral marker — modelfarm returned
+  // cache_creation_input_tokens=0 and cache_read_input_tokens=0 on both the
+  // initial and a repeat call. The Replit modelfarm Anthropic integration
+  // does NOT honour Anthropic prompt caching; the cache_control field is
+  // accepted silently with zero effect. Mother's own response cache (this
+  // block) is the only cache layer available on the native path.
+  // ---------------------------------------------------------------------------
+  const nativeRoute = routeIsNative(selectedModel);
+  if (nativeRoute) {
+    const t0Native = Date.now();
+    let nativeCaptured: unknown = null;
+    let origJsonForCache: ((body: unknown) => Response) | null = null;
+    if (responseCacheKey && !shouldStream) {
+      origJsonForCache = res.json.bind(res) as (body: unknown) => Response;
+      (res as Response & { json: Response["json"] }).json = ((data: unknown): Response => {
+        nativeCaptured = data;
+        return origJsonForCache!(data);
+      }) as Response["json"];
+    }
+    try {
+      const r = await handleNativeIntegration({ req, res, route: nativeRoute, body: rawBody });
+      const duration = Date.now() - t0Native;
+      const backendLabel = `native-${nativeRoute.kind}`;
+      const priceUSD = estimateCostUSD(selectedModel, r.promptTokens, r.completionTokens, r.cacheReadTokens, r.cacheWriteTokens);
+
+      // Cache successful non-stream responses (same robustness check as friend path:
+      // body must have an id and a non-empty choices array — guards against caching
+      // upstream error objects accidentally returned with 200 OK).
+      if (responseCacheKey && nativeCaptured !== null) {
+        const j = nativeCaptured as { id?: string; choices?: unknown[] };
+        if (j.id && Array.isArray(j.choices) && j.choices.length > 0) {
+          cacheSet(responseCacheKey, nativeCaptured, selectedModel);
+        }
+      }
+      finishInflight?.();
+
+      recordCallStat(backendLabel, duration, r.promptTokens, r.completionTokens, r.ttftMs, selectedModel, r.cacheReadTokens, r.cacheWriteTokens);
+      recordCostStat(backendLabel, priceUSD);
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: backendLabel, status: 200, duration, stream: shouldStream,
+        promptTokens: r.promptTokens, completionTokens: r.completionTokens,
+        cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens,
+        cacheTier: r.cacheTier || undefined,
+        priceUSD,
+        level: "info",
+      });
+      req.log.info({
+        model: selectedModel,
+        nativeKind: nativeRoute.kind,
+        nativeModel: nativeRoute.model,
+        durationMs: duration,
+        promptTok: r.promptTokens,
+        completionTok: r.completionTokens,
+        responseCached: !!(responseCacheKey && nativeCaptured),
+        priceUSD,
+      }, "[native] request done via Replit AI integration (bypassed friend proxy)");
+      return;
+    } catch (err) {
+      finishInflight?.();
+      const status = (err as Error & { status?: number }).status ?? 0;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: errMsg, status, model: selectedModel, kind: nativeRoute.kind },
+        "[native] integration call failed");
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: `native-${nativeRoute.kind}`, status: status || 500,
+        duration: Date.now() - t0Native, stream: shouldStream,
+        level: "error", error: errMsg,
+      });
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          try {
+            res.write(`data: ${JSON.stringify({ error: { message: errMsg } })}\n\n`);
+            res.write("data: [DONE]\n\n");
+          } catch { /* ignore */ }
+          res.end();
+        }
+      } else {
+        const clientStatus = (status >= 400 && status < 500) ? status : 502;
+        res.status(clientStatus).json({
+          error: { message: `Native AI integration error: ${errMsg}`, type: "native_integration_error" },
+        });
+      }
+      return;
+    }
   }
 
   // Try every available backend before giving up — with N sub-nodes we have N-1
@@ -4179,7 +4300,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       let buf = "";
 
       // Use Anthropic-format "ping" event rather than an SSE comment so that
-      // Replit's reverse proxy counts it as data activity (comments can be
+      // any upstream reverse proxy counts it as data activity (comments can be
       // treated as idle by some proxies and trigger premature disconnection).
       const keepalive = setInterval(() => {
         if (!res.writableEnded) writeAndFlush(res, "event: ping\ndata: {\"type\":\"ping\"}\n\n");
@@ -5242,7 +5363,7 @@ router.patch("/v1/admin/models", requireApiKey, async (req: Request, res: Respon
 
 /**
  * Runs a streaming completion entirely in the background — not tied to any HTTP
- * response, so no 300 s Replit proxy limit applies.  Pushes SSE chunks to
+ * response, so no platform incoming-proxy limit applies.  Pushes SSE chunks to
  * job.chunks and handles its own continuation loop.
  */
 // ---------------------------------------------------------------------------
@@ -5250,9 +5371,9 @@ router.patch("/v1/admin/models", requireApiKey, async (req: Request, res: Respon
 // ---------------------------------------------------------------------------
 // Submits the request to the sub-node's /v1/jobs endpoint.  The sub-node runs
 // the LLM call in its own background (outgoing connection to AI provider is NOT
-// subject to Replit's 300 s incoming-proxy limit).  We reconnect to the sub-node's
-// /v1/jobs/:id/stream with Last-Event-ID every ~300 s — zero new LLM calls,
-// zero accumulated-text re-input, zero token waste.
+// subject to the platform's incoming-proxy limit).  We reconnect to the sub-node's
+// /v1/jobs/:id/stream with Last-Event-ID before the platform's outgoing cut —
+// zero new LLM calls, zero accumulated-text re-input, zero token waste.
 //
 // Returns true if the sub-node supported Job API and the job completed (or was
 // aborted).  Returns false if the sub-node has no Job API (404 / network error
@@ -5294,7 +5415,8 @@ async function runLegAViaSubNodeJobApi(
     };
     if (lastEventId) streamHeaders["Last-Event-ID"] = lastEventId;
 
-    // Per-connection abort: 270 s wall fires before Replit's ~300 s outgoing-connection cut.
+    // Per-connection abort: wall fires before the platform's outgoing-connection cut
+    // (default 270s, configurable via GATEWAY_SUBNODE_STREAM_WALL_MS).
     // If this fires, we reconnect to the same job using Last-Event-ID and keep streaming.
     const connAbort = new AbortController();
     const propagate  = (): void => { if (!connAbort.signal.aborted) connAbort.abort("job_abort"); };
@@ -5434,9 +5556,9 @@ async function runStreamJobBackground(
 ): Promise<void> {
   // ── Strategy: prefer sub-node Job API (zero token waste) ──────────────────
   // The sub-node runs the LLM call in its own background.  Its outgoing
-  // connection to the AI provider is NOT subject to Replit's 300 s limit.
-  // We reconnect to the sub-node's job stream every ~300 s with Last-Event-ID —
-  // no accumulated text re-input, no 3× token waste.
+  // connection to the AI provider is NOT subject to the platform's HTTP limit.
+  // We reconnect to the sub-node's job stream before the platform cut with
+  // Last-Event-ID — no accumulated text re-input, no 3× token waste.
   //
   // skipJobApi=true when this node is ITSELF handling a POST /v1/jobs request
   // (i.e. we are the sub-node).  In that case we skip Job API to avoid infinite
@@ -5549,7 +5671,7 @@ async function runStreamJobBackground(
         //        accumulated text as input every round — 3 rounds = 3× input tokens.
         //
         //   B) finish_reason = null (stream closed without reason)
-        //      → Replit cuts the mother-proxy → sub-node TCP connection at 300 s.
+        //      → The platform cuts the mother-proxy → sub-node TCP connection.
         //        The model was still generating. Auto-continue silently so the
         //        client sees an unbroken stream with no extra token overhead.
         //
@@ -5656,7 +5778,7 @@ async function runStreamJobBackground(
           if (done) break;
         }
 
-        // Case B: stream closed with no finish_reason → Replit TCP cut, model still running.
+        // Case B: stream closed with no finish_reason → platform TCP cut, model still running.
         // Treat as implicit length so the continuation loop fires.
         // We allow continuation even if contAnyOutput is false to handle cuts during thinking.
         if (finishReason === null) finishReason = "length";
@@ -5747,7 +5869,8 @@ router.post("/v1/jobs", requireApiKey, async (req: Request, res: Response, next:
 });
 
 // GET /v1/jobs/:id/stream — SSE stream with Last-Event-ID reconnect support
-// Keepalive every 200 s so Replit's proxy doesn't cut idle connections.
+// Keepalive cadence (default 200s, configurable via GATEWAY_KEEPALIVE_JOB_MS)
+// so the upstream proxy doesn't cut idle connections.
 router.get("/v1/jobs/:id/stream", requireApiKey, async (req: Request, res: Response) => {
   const job = jobStore.get(String(req.params.id));
   if (!job) {
@@ -5761,7 +5884,8 @@ router.get("/v1/jobs/:id/stream", requireApiKey, async (req: Request, res: Respo
   res.setHeader("X-Accel-Buffering", "no");
   if (res.socket) { res.socket.setNoDelay(true); res.socket.setTimeout(0); }
 
-  // Keepalive every 200 s — below Replit's 300 s proxy idle cut
+  // Keepalive cadence — must stay below the platform's idle-connection cut
+  // (default 200s, configurable via GATEWAY_KEEPALIVE_JOB_MS)
   const keepalive = setInterval(() => {
     if (!res.writableEnded) {
       res.write(`data: ${JSON.stringify({ id: `ka-${Date.now()}`, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: job.model, choices: [] })}\n\n`);
@@ -6145,7 +6269,24 @@ async function handleFriendProxy({
 
   const buildBody = (msgs: OAIMessage[]): Record<string, unknown> => {
     let finalMsgs = msgs;
-    const b: Record<string, unknown> = { ...extraParams, model: normalizedModel, stream };
+    // Deep-clone `extraParams` per buildBody call so the two invocations per
+    // request (probe at 6397, real fetch at 6481) cannot share nested object
+    // references (`reasoning`, `tools`, `cache_control`, vendor extras) and
+    // also so any mutation here cannot propagate back to the IR / req.body
+    // tree held by Express logger / inflight dedup snapshots. structuredClone
+    // is safe for JSON-only HTTP bodies; falls back to a shallow copy on the
+    // pathological case it cannot handle.
+    let safeExtraParams: Record<string, unknown>;
+    if (!extraParams) {
+      safeExtraParams = {};
+    } else {
+      try {
+        safeExtraParams = structuredClone(extraParams);
+      } catch {
+        safeExtraParams = { ...extraParams };
+      }
+    }
+    const b: Record<string, unknown> = { ...safeExtraParams, model: normalizedModel, stream };
     // Only provide an Anthropic-safe default when the caller omitted every explicit
     // output cap. Never override a user-supplied token limit from the incoming request.
     if (typeof maxTokens === "number") {
@@ -6376,6 +6517,32 @@ async function handleFriendProxy({
     b.messages = finalMsgs;
     // Snapshot message structure AFTER injection (roles + char counts, no content).
     msgSummaryStr = describeMsgs(finalMsgs as unknown[]);
+
+    // Final pass: strip Claude sampling params that the upstream rejects.
+    //   • opus-4-7+ / mythos: temperature, top_p, top_k, presence_penalty
+    //     are deprecated unconditionally (Replit ai-integrations-anthropic
+    //     skill: "Setting any of these to a non-default value will return
+    //     a 400 error").
+    //   • other Claude with reasoning enabled: temperature must be 1.0 and
+    //     top_p / top_k / presence_penalty are forbidden (Anthropic
+    //     extended-thinking docs).
+    // Shared single source of truth with `buildOpenRouterRequest`, exported
+    // from `lib/gateway/openrouter.ts`. Must run BEFORE `hashRequest(body)`
+    // at line 6482 so the cache key reflects the post-sanitization body —
+    // otherwise two callers sending different `temperature` values for the
+    // same opus-4-7 prompt would produce different cache keys despite
+    // identical upstream requests, wasting tokens on avoidable misses.
+    sanitizeClaudeSamplingParams(b);
+
+    // SMOKING-GUN debug: prove what mother actually sends to the friend sub-node.
+    // Logs the outbound model + provider block + the route we detected, so we
+    // can tell whether (a) the lock is missing here, or (b) the friend strips it.
+    req.log.info({
+      outboundModel: b["model"],
+      outboundProvider: b["provider"],
+      detectedRoute: detectAbsoluteProviderRoute(model),
+    }, "[OUTBOUND_DEBUG] friend-proxy request body");
+
     return b;
   };
 
@@ -6383,10 +6550,21 @@ async function handleFriendProxy({
   if (!stream) {
     // True upstream task lifetime for non-streaming inference. This is intentionally
     // decoupled from SSE reconnect windows so long reasoning jobs are not hard-killed.
+    const _outboundBody = buildBody(messages);
+    const _outboundJson = JSON.stringify(_outboundBody);
+    // WIRE-LEVEL DEBUG: log the actual byte stream sent on the wire so we can
+    // prove conclusively whether the provider lock survives JSON serialization.
+    req.log.info({
+      backendUrl: `${backend.url}/v1/chat/completions`,
+      wireBytes: _outboundJson.length,
+      wirePreview: _outboundJson.length > 1500
+        ? _outboundJson.slice(0, 750) + "...[" + (_outboundJson.length - 1500) + " bytes]..." + _outboundJson.slice(-750)
+        : _outboundJson,
+    }, "[WIRE_DEBUG] friend-proxy outbound JSON");
     const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(buildBody(messages)),
+      body: _outboundJson,
       signal: AbortSignal.timeout(GATEWAY_TIMEOUTS.upstreamLongPollMs),
     });
     if (!fetchRes.ok) {
@@ -6448,21 +6626,22 @@ async function handleFriendProxy({
   //
   //  Leg A  (Mother proxy → Sub-node)  managed by runStreamJobBackground:
   //    • Calls sub-node's standard /v1/chat/completions — no special endpoints needed.
-  //    • On ECONNRESET / network error (Replit ~300 s outgoing cut): automatically
+  //    • On ECONNRESET / network error (platform outgoing cut): automatically
   //      retries with a continuation message.  Up to MAX_CONT rounds.
   //    • All received chunks are stored in an internal job store (in-memory).
   //
   //  Leg B  (Mother proxy → SillyTavern / client)  managed below:
   //    • Reads chunks from the internal job store via EventEmitter push.
   //    • Sends 15 s SSE keepalive so intermediate proxies don't close the idle leg.
-  //    • 570 s wall timer: fires 30 s before Replit's 600 s hard HTTP cut.
+  //    • Leg B wall timer (default 570s, configurable via GATEWAY_LEG_B_WALL_MS):
+  //      fires before the platform's hard incoming-HTTP cut.
   //      When it fires: closes TCP cleanly (FIN only, no finish_reason) while
   //      Leg A keeps running.  Next identical request re-attaches to the same
   //      job and replays buffered chunks — ZERO new LLM calls.
   //    • On genuine client disconnect (user pressed stop): abort Leg A immediately.
   //
-  // Result: one LLM call per user turn, unlimited HTTP reconnects across Replit's
-  // 600 s hard limit.  Completely transparent to SillyTavern / NewAPI.
+  // Result: one LLM call per user turn, unlimited HTTP reconnects across any
+  // platform's hard HTTP limit.  Completely transparent to SillyTavern / NewAPI.
   //
 
   // ── Leg A: Create or re-attach to existing job ────────────────────────────
@@ -6561,12 +6740,14 @@ async function handleFriendProxy({
     safeWrite(`data: ${JSON.stringify({ object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [] })}\n\n`);
   }, GATEWAY_TIMEOUTS.keepaliveClientMs);
 
-  // ── Leg B 570 s wall timer ─────────────────────────────────────────────────
-  // Replit enforces a hard 600 s absolute limit on incoming HTTP connections.
-  // Fire 30 s early: set legBWallFired, emit "legb_wall" to exit the drain
-  // loop, then close TCP with FIN only — no finish_reason, no [DONE].
-  // Leg A keeps running.  Next identical POST → same liveFp → liveJobMap hit
-  // → replay buffered chunks at full speed → ZERO new LLM calls.
+  // ── Leg B wall timer ───────────────────────────────────────────────────────
+  // Many hosting platforms enforce a hard absolute limit on incoming HTTP
+  // connections (Replit: 600s). Fire before that limit so we can:
+  // set legBWallFired, emit "legb_wall" to exit the drain loop, then close
+  // TCP with FIN only — no finish_reason, no [DONE]. Leg A keeps running.
+  // Next identical POST → same liveFp → liveJobMap hit → replay buffered
+  // chunks at full speed → ZERO new LLM calls.
+  // Default 570s, configurable via GATEWAY_LEG_B_WALL_MS.
   const LEG_B_WALL_MS = GATEWAY_TIMEOUTS.legBWallMs;
   const legBWallTimer = setTimeout(() => {
     legBWallFired = true;
@@ -6793,8 +6974,8 @@ router.post("/v1/videos", requireApiKey, async (req: Request, res: Response) => 
         createdAt: Date.now(),
       });
 
-      // Build polling_url from the incoming request so it survives Replit's
-      // reverse proxy (x-forwarded-proto / x-forwarded-host).
+      // Build polling_url from the incoming request so it survives any
+      // upstream reverse proxy (x-forwarded-proto / x-forwarded-host).
       const proto    = ((req.headers["x-forwarded-proto"] as string | undefined) ?? "https").split(",")[0].trim();
       const host     = (req.headers["x-forwarded-host"] as string | undefined) ?? req.get("host") ?? "localhost";
       const mount    = req.path.endsWith("/v1/videos") ? req.path.slice(0, -"/v1/videos".length) : "";
@@ -7024,5 +7205,54 @@ router.all(/^\/v1\/(?!admin|jobs)/, requireApiKey, async (req: Request, res: Res
 // All traffic goes through handleFriendProxy (friend proxy sub-nodes only).
 // Local AI SDK calls are banned at the architecture level.
 // ---------------------------------------------------------------------------
+
+// TEMP DIAG — REMOVE AFTER DEBUG
+router.post("/__diag/or-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_OPENROUTER_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+  if (!key) { res.status(500).json({ error: "no OR key" }); return; }
+  const r = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(req.body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, json: json ?? text });
+});
+router.post("/__diag/anthropic-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com/v1";
+  if (!key) { res.status(500).json({ error: "no anthropic key" }); return; }
+  const r = await fetch(`${base}/messages`, {
+    method: "POST",
+    headers: {
+      "x-api-key": key,
+      Authorization: `Bearer ${key}`,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(req.body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, json: json ?? text });
+});
+router.post("/__diag/gemini-direct", requireApiKey, async (req: Request, res: Response) => {
+  const key = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"];
+  const base = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"] ?? "https://generativelanguage.googleapis.com/v1beta";
+  if (!key) { res.status(500).json({ error: "no gemini key" }); return; }
+  const model = (req.body && typeof req.body === "object" && (req.body as Record<string, unknown>)["model"]) || "gemini-2.0-flash";
+  const body = { ...(req.body as Record<string, unknown>) };
+  delete body["model"];
+  const r = await fetch(`${base}/models/${String(model)}:generateContent?key=${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let json: unknown = null; try { json = JSON.parse(text); } catch {}
+  res.status(200).json({ baseUrl: base, status: r.status, model, json: json ?? text });
+});
 
 export default router;

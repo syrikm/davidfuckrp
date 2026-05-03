@@ -194,10 +194,35 @@ function applyModelResolution(ir: GatewayRequestIR): void {
 }
 
 function cloneUnknownFields(source: Record<string, unknown>, excludedKeys: string[]): Record<string, unknown> {
+  // Deep-clone (Node ≥17 structuredClone) so nested objects from `req.body`
+  // — `metadata`, `cache_control`, custom vendor fields, etc. — do not leak
+  // shared references into the IR. Without this, downstream mutations on
+  // `body.<unknownKey>.<nested>` would silently propagate back to the
+  // Express-level request body and to any other handler that happens to
+  // hold a reference (logging, retry, inflight dedup snapshots).
+  // HTTP request bodies are JSON-only (no functions / BigInt / cycles), so
+  // structuredClone never throws here in practice; the try/catch is
+  // belt-and-braces for malformed runtime values.
   const excluded = new Set(excludedKeys);
   const output: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (!excluded.has(key)) output[key] = value;
+    if (excluded.has(key)) continue;
+    if (value === null || typeof value !== "object") {
+      output[key] = value;
+      continue;
+    }
+    try {
+      output[key] = structuredClone(value);
+    } catch {
+      // Fall back to shallow copy — preserves the previous behaviour for the
+      // (vanishingly rare) un-cloneable value, with a JSON-roundtrip first
+      // for plain-object cases.
+      try {
+        output[key] = JSON.parse(JSON.stringify(value));
+      } catch {
+        output[key] = value;
+      }
+    }
   }
   return output;
 }

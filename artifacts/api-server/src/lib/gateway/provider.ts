@@ -395,7 +395,7 @@ function stripVendorPrefix(model: string): string {
   return normalized;
 }
 
-function inferVendorModelPath(logicalModel: string): string {
+export function inferVendorModelPath(logicalModel: string): string {
   const normalized = canonicalizeLogicalModel(logicalModel);
   if (!normalized) return normalized;
   if (normalized.includes("/")) return canonicalizeModelIdentifier(normalized);

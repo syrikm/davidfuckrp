@@ -73,6 +73,7 @@ import {
   detectAbsoluteProviderRoute,
   detectGatewayProtocol,
   executeGatewayRequest,
+  inferVendorModelPath,
   listAbsoluteProviderPrefixAliases,
   normalizeGatewayRequest,
   sanitizeClaudeSamplingParams,
@@ -1122,12 +1123,53 @@ function applyModelRoute(id: string): string {
 //   2. the sub-node's own router sees the same prefix it would receive
 //      directly from a vendor SDK.
 //
-// The historical behaviour of rewriting `bedrock/claude-*` → `anthropic/claude-*`
-// stripped the routing intent and forced OpenRouter to fall back to its
-// default provider order — silently violating the absolute-routing contract.
-// That rewrite is now removed; see ROUTING_AUDIT.md §4.
+// Wire-level prefix normalisation:
+//   • The mother gateway accepts many alias prefixes for a single OpenRouter
+//     provider (e.g. `bedrock` / `amazon-bedrock`, `xai` / `x-ai`,
+//     `togetherai` / `together`, `moonshot` / `moonshotai`, …).
+//   • Friend / OpenRouter only recognise a subset of these aliases as model
+//     id prefixes.  Forwarding the literal alias produces
+//     `400 <alias>/<rest> is not a valid model ID`.
+//   • For pure routing-only providers (groq/cerebras/fireworks/together/…)
+//     OpenRouter never recognises `<provider>/<model>` as a model id at all
+//     — the canonical id is `<author>/<model>` and provider routing is
+//     expressed via `provider.order`.
+//
+// Strategy (provider lock is preserved separately by buildAbsoluteProviderBlock):
+//   1. Detect the absolute-routing prefix.
+//   2. Strip it from the model id, leaving `<rest>`.
+//   3. If `<rest>` already includes a vendor namespace (`a/b`), keep it.
+//      Otherwise infer the canonical OpenRouter author (`claude-*` →
+//      `anthropic/claude-*`, `llama-*` → `meta-llama/llama-*`, …).
+//   4. Forward the canonical OR id; the provider lock travels in the
+//      separate `provider.order` block, so the prefix is no longer needed
+//      on the wire.
+// OpenRouter author namespaces — when the routing prefix's canonical slug
+// matches one of these, we can safely use it as the model author for any
+// bare model name that `inferVendorModelPath` doesn't recognise via pattern.
+// This covers families like `kimi-*` (moonshotai), `glm-*` (z-ai),
+// `ernie-*` (baidu), where there is no widely shared name pattern but the
+// provider is also the canonical OR author namespace.
+const OR_AUTHOR_NAMESPACES = new Set([
+  "anthropic", "openai", "google", "x-ai", "deepseek", "mistralai",
+  "cohere", "perplexity", "moonshotai", "z-ai", "minimax", "baidu",
+  "nvidia", "qwen", "meta-llama", "amazon",
+]);
+
 function normalizeFriendModel(m: string): string {
-  return m;
+  const route = detectAbsoluteProviderRoute(m);
+  if (!route) return m;
+  const rest = m.slice(route.prefix.length + 1); // drop "<prefix>/"
+  if (!rest) return m;
+  const inferred = inferVendorModelPath(rest);
+  // If pattern inference added an author namespace (now contains "/"),
+  // use it.  Otherwise fall back to using the route's canonical provider
+  // slug as the author when it's a known OR author namespace.
+  if (inferred.includes("/")) return inferred;
+  if (route.provider && OR_AUTHOR_NAMESPACES.has(route.provider)) {
+    return `${route.provider}/${inferred}`;
+  }
+  return inferred;
 }
 
 // Build the OpenRouter `provider` block for an absolute-routing prefix.
